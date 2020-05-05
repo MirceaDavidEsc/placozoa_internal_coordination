@@ -1,0 +1,37 @@
+---
+title: "Scale Free Sim Noise Process"
+author: "Mircea Davidescu"
+date: "April 14, 2019"
+output: html_document
+---
+
+```{r processOrder, include=FALSE}
+
+mapOrderMeasure = function(processedFile) {
+  orderData = read_rds(processedFile) %>% mutate(rotation = unlist(map(noBoundary, measureRotation)),
+                                                    polarization = unlist(map(noBoundary, measurePolarization)),
+                                                    dilatation = unlist(map(noBoundary, measureDilatation))) %>%
+    mutate(Order = (rotation^2 + polarization^2 + dilatation^2)^(1/3)) %>%
+    select(Frame, rotation, polarization, dilatation, Order)
+  write_rds(orderData, paste(dirname(processedFile),"/order",basename(processedFile), sep=""))
+  return(orderData)
+}
+
+if (file.exists(paste(simDir, "orderData.rds", sep = "/"))) {
+  orderData = read_rds(paste(simDir, "orderData.rds", sep = "/"))
+}
+
+# If there are any folders that need order, calculate the order.
+
+needsOrder = left_join(metadata, orderData, by = c("Noise" = "Noise", "Size" = "Size", "Replicate" = "Replicate")) %>% filter(is.null(Order))
+
+
+if (nrow(needsOrder) != 0) {
+  cluster_copy(cl, mapOrderMeasure)
+  orderData = needsOrder %>% partition() %>% mutate(orderDF = map(processedFile, mapOrderMeasure)) %>% collect() %>% ungroup()
+}
+
+write_rds(orderData, paste(simDir, "orderData_sim_noise_fluid.rds", sep = "/"))
+write_rds(orderData, paste(projectFolder, "FigureData/orderData_sim_noise_fluid.rds", sep = "/"))
+
+```

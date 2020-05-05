@@ -1,0 +1,968 @@
+---
+title: "Scale-free analysis: Placozoa"
+author: "Mircea Davidescu"
+date: "December 28, 2016"
+output: 
+  pdf_document: 
+    number_sections: yes
+    toc: yes
+  html_document: 
+    highlight: pygments
+---
+
+
+```{r setup}
+projectFolder = "D:/Mircea/Projects/RESEARCH/InternalCoordination/"
+dropboxFolder = "C:/Users/mirce/Dropbox/ForPawel_Results"
+processedDataFolder = "Data_Processed"
+originalDataFolder = "Data_Original"
+knitr::opts_knit$set(root.dir = projectFolder)
+hdf5Identifier = "longformOpticalFlow.hdf5"
+masterDir = "E:/Placozoa/HighMagTracked"
+
+# These foldeers need to be curated.
+weirdFolders = c("2014-09-19-run_1", "2014-09-13-run_2", "2014-09-11-run_1", "2014-06-20-run_1", "2014-09-17-run_1", "2015-02-24-run_2")
+
+# Packages made by others.
+require(tidyverse)
+require(forcats)
+require(rhdf5)
+require(cowplot)
+require(jpeg)
+require(grid)
+require(alphahull)
+require(modelr)
+require(polynom)
+require(stringr)
+require(pracma)
+require(sp)
+require(latex2exp)
+require(zoo)
+
+# Set up parallel processing environment.
+library(multidplyr)
+cl = create_cluster(7)
+set_default_cluster(cl)
+
+
+# My own packages.
+require(bigh5)
+require(collective)
+require(scalefree)
+require(mover)
+
+
+# Constants needed to convert to real units.
+pxPerMicrometer = 0.752
+pxPerMicrometerHamm = 0.616
+micrometerPerVoxel = 8/pxPerMicrometer #8 px per vector field voxel, 0.752 px per micrometer.
+micrometerPerVoxelHamm = 8/pxPerMicrometerHamm
+fps = 2
+
+
+# A data frame to hold conversion factor constants, such as pixels per micron, and the amount of pixels per voxel. Also defined is the frames per second.
+conversionFactors = data.frame(hammMovie = c(T,F), pxPerMicron = c(0.616, 0.752), pxPerVoxel = 8, maxY = c(2048, 1040), maxX = c(2048, 1392))
+framePerSec = 2
+
+# Make the plots prettier.
+cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
+theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.title=element_text(size = 18, hjust = 0.5), axis.text=element_text(size = 18), legend.title = element_text(size = 18, face = "bold"), legend.text = element_text(size = 12, face="plain"))
+```
+
+# Process the data
+
+```{r processVectorFields, eval=FALSE}
+source(paste(projectFolder,"src/Step_1_Process_Data.R",sep="/"))
+```
+
+# Collective order
+
+## Calculate the collective order for each animal for each frame
+
+```{r relevantOrderData}
+source(paste(projectFolder,"/src/Step_2_Order_Measures.R", sep = "/"))
+```
+
+
+## Plot the effect of size on collective order
+
+```{r plotOrderData, cache=T, dependson="allOrderMeasures"}
+relevantOrderData = read_rds(paste(projectFolder, processedDataFolder, "relevantOrderData.rds", sep = "/"))
+
+# Summary data for relevant order frames.
+uncurledOrderSummary = relevantOrderData %>% group_by(folder) %>% summarize_each(funs(mean,sd), c(EquivalentDiameter, polarization, rotation, crystalMeasure))
+uncurledCount = relevantOrderData %>% group_by(folder) %>% summarise(count=n())
+uncurledOrderSummary = inner_join(uncurledOrderSummary, uncurledCount)
+
+(collectiveOrderSizePlot = ggplot(uncurledOrderSummary, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + geom_point() + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order") + stat_smooth(method="lm"))
+save_plot(paste(projectFolder, "Figures", "collectiveOrderSize.pdf", sep ="/"), collectiveOrderSizePlot)
+save_plot(paste(dropboxFolder, "Panels", "collectiveOrderSize.pdf", sep = "/"), collectiveOrderSizePlot)
+
+summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary))
+
+(collectiveOrderLM = summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary)))
+
+# Get the order phase space for two animals of different sizes.
+arrangedBySize = uncurledOrderSummary %>% arrange(EquivalentDiameter_mean)
+(smallOrder = relevantOrderData %>% filter(folder == arrangedBySize$folder[[1]]) %>% 
+    ggplot(aes(abs(rotation),polarization)) + stat_bin2d(drop = F, show.legend = F) +
+    scale_fill_gradientn(name="count", colours = c("black","blue","yellow","red"), values = c(0,0.01,0.5,1.0), na.value = "black") +
+    coord_fixed(ratio=1) + theme(legend.position = "right") + scale_x_continuous(name = "|R|", breaks = c(0,0.5, 1)) + 
+    scale_y_continuous(name = "P", breaks = c(0, 0.5, 1.0)) + ggtitle("250 micrometers"))
+
+(bigOrder = relevantOrderData %>% filter(folder == arrangedBySize$folder[[nrow(arrangedBySize)]]) %>% 
+    ggplot(aes(abs(rotation),polarization)) + stat_bin2d(drop = F, show.legend = F) +
+    scale_fill_gradientn(name="count", colours = c("black","blue","yellow","red"), values = c(0,0.01,0.5,1.0), na.value = "black") +
+    coord_fixed(ratio=1) + theme(legend.position = "right") + scale_x_continuous(name = "|R|", breaks = c(0,0.5, 1), limits = c(0,1)) + 
+    scale_y_continuous(name = "", breaks = c(0, 0.5, 1.0)) + ggtitle("1600 micrometers"))
+
+orderPhasePlots = plot_grid(smallOrder, bigOrder)
+save_plot(paste(projectFolder, "Figures", "collectiveOrderPhasePlots.pdf", sep = "/"), plot = orderPhasePlots, base_height = 9, base_width = 12)
+
+
+orderValues = read_rds(paste(projectFolder, processedDataFolder, "exampleOrder.rds", sep = "/"))
+(rotPlot = orderValues %>% ggplot(aes(Frame/2, rotation)) + geom_line() + geom_hline(yintercept = 0) + scale_y_continuous(name = "R", breaks=c(-1,0,1), limits = c(-1,1)) + scale_x_continuous("Time (s)", breaks=c(0,3600,7200)))
+(rotHist = orderValues %>% ggplot(aes(rotation)) + geom_histogram() + scale_x_continuous(name = "R", breaks=c(-1,0,1), limits = c(-1,1)) + ylab("") + theme(axis.text.y = element_blank()) + coord_flip())
+
+
+(polPlot = orderValues %>% ggplot(aes(Frame, polarization)) + geom_line() + geom_hline(yintercept = 0) + scale_y_continuous(name = "P", breaks=c(-1,0,1), limits = c(0,1)) + scale_x_continuous("Time (s)", breaks=c(0,3600,7200)))
+(polHist = orderValues %>% ggplot(aes(polarization)) + geom_histogram() + scale_x_continuous(name = "P", breaks=c(-1,0,1), limits = c(0,1)) + ylab("") + theme(axis.text.y = element_blank()) + coord_flip())
+
+(dilPlot = orderValues %>% ggplot(aes((Frame - 1)/2, dilatation)) + geom_line() + geom_hline(yintercept = 0) + scale_y_continuous(name = expression(Lambda), breaks=c(-1,0,1), limits = c(-1,1)) + scale_x_continuous("Time (s)", breaks=c(0,3600,7200)))
+(dilHist = orderValues %>% ggplot(aes(dilatation)) + geom_histogram() + scale_x_continuous(name = expression(Lambda), breaks=c(-1,0,1), limits = c(-1,1)) + ylab("") + theme(axis.text.y = element_blank()) + coord_flip())
+
+orderValsPlot = plot_grid(rotPlot + theme(axis.text.x = element_blank(), axis.title.x = element_blank()), polPlot + theme(axis.text.x = element_blank()), dilPlot + xlab("Time (s)"), ncol = 1, align="v")
+orderValsHists = plot_grid(rotHist, polHist, dilHist, ncol = 1)
+(orderPlot = plot_grid(orderValsHists, orderValsPlot, ncol = 2, rel_widths = c(1,2)))
+save_plot(paste(projectFolder, "Figures", "orderPlot.pdf", sep ="/"), orderPlot, base_height = 14, base_width = 19)
+```
+
+
+## Collective order: time series and histograms
+
+Below we consider a single animal and observe its time series of collective order, as well as the distribution of these values.
+
+```{r orderMeasureTimeSeries, cache=T, dependson="getCollectiveOrder"}
+if (!file.exists(paste(projectFolder, processedDataFolder, "exampleOrder.rds", sep = "/"))) {
+  exampleFolder = paste(masterDir, "2013-07-01-run_1", sep = "/")
+  orderValues = read_csv(paste(exampleFolder, "OrderMeasures.csv", sep = "/"))
+  write_rds(orderValues, paste(projectFolder, processedDataFolder, "exampleOrder.rds", sep = "/"))
+}
+orderValues = read_rds(paste(projectFolder, processedDataFolder, "exampleOrder.rds", sep = "/"))
+(rotPlot = orderValues %>% ggplot(aes(Frame/2, rotation)) + geom_line() + geom_hline(yintercept = 0) + scale_y_continuous(name = "R", breaks=c(-1,0,1), limits = c(-1,1)) + scale_x_continuous("Time (s)", breaks=c(0,3600,7200)))
+(rotHist = orderValues %>% ggplot(aes(rotation)) + geom_histogram() + scale_x_continuous(name = "R", breaks=c(-1,0,1), limits = c(-1,1)) + ylab("") + theme(axis.text.y = element_blank()) + coord_flip())
+
+
+(polPlot = orderValues %>% ggplot(aes(Frame, polarization)) + geom_line() + geom_hline(yintercept = 0) + scale_y_continuous(name = "P", breaks=c(-1,0,1), limits = c(0,1)) + scale_x_continuous("Time (s)", breaks=c(0,3600,7200)))
+(polHist = orderValues %>% ggplot(aes(polarization)) + geom_histogram() + scale_x_continuous(name = "P", breaks=c(-1,0,1), limits = c(0,1)) + ylab("") + theme(axis.text.y = element_blank()) + coord_flip())
+
+(dilPlot = orderValues %>% ggplot(aes((Frame - 1)/2, dilatation)) + geom_line() + geom_hline(yintercept = 0) + scale_y_continuous(name = expression(Lambda), breaks=c(-1,0,1), limits = c(-1,1)) + scale_x_continuous("Time (s)", breaks=c(0,3600,7200)))
+(dilHist = orderValues %>% ggplot(aes(dilatation)) + geom_histogram() + scale_x_continuous(name = expression(Lambda), breaks=c(-1,0,1), limits = c(-1,1)) + ylab("") + theme(axis.text.y = element_blank()) + coord_flip())
+
+orderValsPlot = plot_grid(rotPlot + theme(axis.text.x = element_blank(), axis.title.x = element_blank()), polPlot + theme(axis.text.x = element_blank()), dilPlot + xlab("Time (s)"), ncol = 1, align="v")
+orderValsHists = plot_grid(rotHist, polHist, dilHist, ncol = 1)
+(orderPlot = plot_grid(orderValsHists, orderValsPlot, ncol = 2, rel_widths = c(1,2)))
+save_plot(paste(projectFolder, "Figures", "orderPlot.pdf", sep="/"), orderPlot, base_height = 14, base_width = 19)
+```
+
+# Collective order and fluctuation energy at phase transition
+
+Pawel suggested that I look at the relation between the relative fluctuation magnitude and collective order as another avenue with which to determine if we are at criticality. There should be a clear and inverse relationship between collective order and the magnitude of fluctuations within an animal. The basic intuition is that in a larger system we would expect a sharper transition between order and disorder. This is a consequence of the second-order phase transition. Essentially, there is a certain amount of energy from movement in the animal. We subtract a certain amount that goes into collective movements, leaving a fluctuation fraction. The amount of noise will determine what proportion of the original movement energy is lost into these fluctuations.
+
+Because we are dealing with a dynamical biological system, there should be some variation in the level of noise over time. At some times the animal will appear to be highly ordered, while at other times it will be very disordered. The major point is, though, that the fluctuation energy should be bound somewhere between 0 (all movement is going into a collective component) and 1 (all movement is going into fluctuation). This is the larger problem of the current setup that I have. If we consider the plot of the fluctuation magntiude against the collective order, these should be inversely correlated. Greater fluctuation magnitude means that less and less of the velocity is going into collective order. The slope can therefore be characterized for every animal.
+
+
+## Order and fluctuation magnitudes
+
+simply plot ORDER vs <u^2> (squared fluctuations) and have a look at this slopes
+
+```{r orderFluctMagRelation, cache = T, dependson="allShapeData"}
+# Do this type of analysis for one animal
+sampleVelocity = read_rds(paste(projectFolder, processedDataFolder, "sampleVelocityfield.rds", sep = "/"))
+sampleFluctuation = calculateFluctuationField(sampleVelocity)
+sampleCollective = calculateCollectiveField(sampleVelocity)
+velocityData = bind_cols(sampleVelocity, select(sampleFluctuation, fluctX, fluctY), select(sampleCollective, collectiveX, collectiveY)) %>%
+  mutate(vMag = sqrt(vX^2 + vY^2), uMag = sqrt(fluctX^2 + fluctY^2), wMag = sqrt(collectiveX^2 + collectiveY^2))
+sampleSummary = velocityData %>% summarise(meanVMag = mean(vMag), meanUMag = mean(uMag), meanWMag = mean(wMag))
+
+# Do for all velocity fields
+orderMeasures = read_rds(paste(projectFolder, processedDataFolder, "allOrderMeasures.rds", sep = "/")) %>% filter(!Interpolated)
+
+# Use fluctuationVectors.rds for random sample data, IsingApproxFluctuation.rds for non-rotating and certain speed data.
+vectorFieldsFile = paste(projectFolder, processedDataFolder, "fluctuationVectors.rds", sep = "/")
+fluctuationVectors = read_rds(vectorFieldsFile) %>% inner_join(orderMeasures) %>%
+  mutate(vEnergy = vX^2 + vY^2, uEnergy = uX^2 + uY^2)
+
+energyMeasures = fluctuationVectors %>% group_by(folder, Frame) %>% summarise(meanVE = mean(vEnergy), meanUE = mean(uEnergy)) %>%
+  mutate(energyRatio = meanUE / meanVE) %>% ungroup()
+
+energyOrderSize = inner_join(orderMeasures, energyMeasures) %>% inner_join(meanSizes)
+
+energyOrderSize %>% ggplot(aes(energyRatio, order)) + geom_point()
+
+# Plot the linear fits to each animal, to see roughly how their slopes fall.
+slopesPlot = ggplot(energyOrderSize, aes(energyRatio, order, group = folder, color = EquivalentDiameter)) + geom_point(alpha = 0.2, color = "black") + stat_smooth(method = "lm", se = F) 
+save_plot(paste(projectFolder, "Figures", "slopesPlot.pdf", sep = "/"), slopesPlot, base_width = 6, base_height = 5)
+
+library(broom)
+energyModel = function(df) {
+  lm(order ~ energyRatio, data = df)
+}
+
+groupedEnergy = energyOrderSize %>% group_by(folder, EquivalentDiameter) %>% nest() %>% arrange(EquivalentDiameter) %>% mutate(sizeRank = 1:nrow(.))
+
+
+modelSlopes = groupedEnergy %>% mutate(linearFit = map(data, energyModel)) %>%
+  mutate(slope = map(linearFit, function(x) {x$coefficients[[2]]})) %>% select(folder, EquivalentDiameter, slope) %>% unnest()
+(diameterSlopePlot = ggplot(modelSlopes, aes(EquivalentDiameter, slope)) + geom_point() + xlab(expression(paste("D (",mu,"m)",sep=""))) +
+    ylab("S'(r)"))
+
+
+binnedSlopes = modelSlopes %>% group_by(cut(EquivalentDiameter, 6)) %>% summarise(mean_size = mean(EquivalentDiameter), sd_size = sd(EquivalentDiameter), meanSlope = mean(slope), sdSlope = sd(slope), count = n())
+
+binnedSlopesPlot = ggplot(binnedSlopes, aes(mean_size, meanSlope)) + geom_point() + geom_errorbar(aes(ymin = meanSlope - sdSlope/sqrt(count), ymax = meanSlope + sdSlope/sqrt(count)))
+save_plot(paste(projectFolder, "Figures", "binnedSizeSlope.pdf", sep = "/"), binnedSlopesPlot)
+
+(plotPhaseTransitionIsing = plot_grid(slopesPlot, diameterSlopePlot, binnedSlopesPlot, ncol = 3, labels = "AUTO"))
+save_plot(paste(projectFolder, "Figures", "phaseTransition.pdf", sep = "/"), diameterSlopePlot, base_height = 5, base_width = 7)
+```
+
+
+## Order and fluctuation magnitudes: only polarized data.
+
+```{r orderFluctMagIsing, cache=T, dependson = "orderFluctMagRelation"}
+vectorFieldsFile = paste(projectFolder, processedDataFolder, "IsingApproxFluctuation.rds", sep = "/")
+orderMeasures = read_rds(paste(projectFolder, processedDataFolder, "allOrderMeasures.rds", sep = "/")) %>% filter(!Interpolated)
+meanSizes = read_csv("Data_Processed/meanSizes.csv")
+
+#filteredOrder = filter(orderMeasures, meanSpeed >= 2 & meanSpeed <= 2.5)
+fluctuationVectors = read_rds(vectorFieldsFile) %>% inner_join(orderMeasures) %>%
+  mutate(vEnergy = vX^2 + vY^2, uEnergy = uX^2 + uY^2)
+
+energyMeasures = fluctuationVectors %>% group_by(folder, Frame) %>% summarise(meanVE = mean(vEnergy), meanUE = mean(uEnergy)) %>%
+  mutate(energyRatio = meanUE / meanVE) %>% ungroup()
+
+energyOrderSize = inner_join(orderMeasures, energyMeasures) %>% inner_join(meanSizes)
+
+library(broom)
+energyModel = function(df) {
+  lm(order ~ energyRatio, data = df)
+}
+
+groupedEnergy = energyOrderSize %>% filter(complete.cases(.)) %>% group_by(folder, EquivalentDiameter) %>% nest() %>% arrange(EquivalentDiameter) %>% mutate(sizeRank = 1:nrow(.))
+
+  
+modelSlopes = groupedEnergy %>% mutate(linearFit = map(data, energyModel)) %>%
+  mutate(slope = map(linearFit, function(x) {x$coefficients[[2]]})) %>% select(folder, EquivalentDiameter, slope) %>% unnest() %>%
+  mutate(logSize = log(EquivalentDiameter))
+linearFit = glm(slope ~ EquivalentDiameter, data = modelSlopes)
+expFit = glm(slope ~ logSize, data = modelSlopes)
+AICModels = AIC(expFit, linearFit)
+pCorrect = exp((AICModels[[1,2]] - AICModels[[2,2]])/2)
+print(paste("Probability that linear model is right:", pCorrect))
+
+modelSlopes = modelSlopes %>% add_predictions(linearFit, "linear") %>% add_predictions(expFit, "exponential")
+
+
+binnedSlopes = modelSlopes %>% group_by(cut(EquivalentDiameter, 6)) %>% summarise(mean_size = mean(EquivalentDiameter), sd_size = sd(EquivalentDiameter), meanSlope = mean(slope), sdSlope = sd(slope), count = n())
+
+
+diameterSlopePlot = ggplot(modelSlopes, aes(EquivalentDiameter, slope)) + geom_point() + 
+    geom_line(aes(EquivalentDiameter, linear), size = 1, alpha = 0.5, color = "red") + geom_line(aes(EquivalentDiameter, exponential), size = 1) +
+    xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab(expression(paste("O'(",eta,"*)", sep = ""))) + guides(color = F) +
+  theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20))
+save_plot(paste(dropboxFolder, "Panels", "diameter_phaseTransition_slope.pdf", sep = "/"), diameterSlopePlot)
+
+slopesPlotRatio = energyOrderSize %>% filter(complete.cases(.)) %>% ggplot(aes(energyRatio, order, group = folder, color = EquivalentDiameter)) + 
+  geom_point(alpha = 0.2, color = "black") + stat_smooth(method = "lm", se = F) + 
+  scale_color_gradient(expression(paste("D (",mu,"m)", sep = "")), high = "blue", low = "red") +
+      scale_x_continuous(expression(paste(eta,"*",sep="")), breaks = c(0,0.5,1), limits = c(0,1)) +
+  scale_y_continuous("Order", breaks = c(0,0.5,1), limits = c(0,1)) + guides(color = F) +
+  theme_bw() + theme(axis.title = element_text(size= 20), axis.text = element_text(size = 18))
+save_plot(paste(dropboxFolder, "Panels", "effectiveNoise_order_bySize.pdf", sep = "/"), slopesPlotRatio)
+
+(panel2B = ggdraw() + draw_plot(diameterSlopePlot) + draw_plot(slopesPlotRatio, 0.5, 0.5, 0.5, 0.5))
+save_plot(paste(dropboxFolder, "Panels", "sizePhaseTransition.pdf", sep = "/"), panel2B, base_height = 9, base_width = 9)
+
+binnedSlopesPlot = ggplot(binnedSlopes, aes(mean_size, meanSlope)) + geom_point() + geom_errorbar(aes(ymin = meanSlope - sdSlope/sqrt(count), ymax = meanSlope + sdSlope/sqrt(count)))
+save_plot(paste(projectFolder, "Figures", "binnedSizeSlope_Ising.pdf", sep = "/"), binnedSlopesPlot)
+save_plot(paste(dropboxFolder, "Panels", "binnedSizeSlope_Ising.pdf", sep = "/"), binnedSlopesPlot)
+```
+
+
+# Plot example vector fields
+
+
+```{r compareTwoAnimals, cache=TRUE, echo=FALSE, dependson="sampleFrames"}
+# Read a randomly-sampled vector field.
+fluctuationVectors = read_rds(paste(projectFolder, "Data_Processed/fluctuationVectors.rds", sep = "/")) %>% group_by(folder, Frame) %>% nest() %>% arrange(folder, Frame)
+exampleVectors = fluctuationVectors %>% slice(c(4, 205))
+
+bigAnimal = exampleVectors %>% slice(1) %>% unnest() %>% mutate(X = X - mean(X), Y = Y - mean(Y))
+bigAnimal = exampleVectors %>% slice(1) %>% unnest() %>% slice(seq(1, to = nrow(.), by = 30)) %>%
+  mutate(X = X - mean(X), Y = Y - mean(Y))
+
+
+smallAnimal = exampleVectors %>% slice(2) %>% unnest() %>% mutate(X = X - mean(X), Y = Y - mean(Y))
+smallAnimalSubsample = exampleVectors %>% slice(2) %>% unnest() %>% slice(seq(1, to = nrow(.), by = 30)) %>%
+  mutate(X = X - mean(X), Y = Y - mean(Y))
+  
+bigBoundBox = c(range(bigAnimal$X), range(bigAnimal$Y))
+smallBoundBox = bigBoundBox
+smallBoundBox[[4]] = min(smallAnimal$Y)
+
+
+bigFullV = bigAnimal %>% select(X, Y, vX, vY) %>% quiverPlot(1, T) + coord_fixed() + 
+  guides(alpha = F) + theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text = element_blank())
+
+ggplot(smallAnimalSubsample, aes(X, Y, xend = X+4*vX, yend = Y+4*vY)) + geom_segment(arrow=arrow(angle=20,length=unit(0.2,"cm")))
+
+
+frameData = smallAnimal %>% mutate(speed = sqrt(vX^2 + vY^2), angle = atan2(x = vX, y = vY))
+    cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
+    p = ggplot(frameData) + geom_tile(aes(X, Y, fill=angle, alpha=speed)) +
+      scale_color_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi),
+                            labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) +
+      scale_fill_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi),
+                           labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi))))
+
+(smallFullV = p + coord_fixed() + 
+  guides(alpha = F) + theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.title = element_blank()) +
+  geom_segment(data = smallAnimalSubsample, aes(X, Y, xend = X+6*vX, yend = Y+4*vY), size = 1, color = "black", alpha = 1,
+               arrow=arrow(angle=20,length=unit(0.4,"cm"))))
+
+# Fluctuation plots
+bigFluctV = bigAnimal %>% select(X, Y, uX, uY) %>% quiverPlot(1, T) + xlim(bigBoundBox[1:2]) + ylim(bigBoundBox[3:4]) + coord_fixed() + 
+  guides(alpha = F) +  theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text = element_blank())
+smallFluctV = smallAnimal %>% select(X, Y, uX, uY) %>% quiverPlot(1, T) + xlim(smallBoundBox[1:2]) + ylim(smallBoundBox[3:4]) + coord_fixed() + guides(alpha = F) +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text = element_blank())
+# Collective plots
+bigCollectiveV = bigAnimal %>% select(X, Y, wX, wY) %>% quiverPlot(1, T) + xlim(bigBoundBox[1:2]) + ylim(bigBoundBox[3:4]) + coord_fixed() + guides(alpha = F) +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text = element_blank())
+smallCollectiveV = smallAnimal %>% select(X, Y, wX, wY) %>% quiverPlot(1, T) + xlim(smallBoundBox[1:2]) + ylim(smallBoundBox[3:4]) + coord_fixed() + guides(alpha = F) + theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text = element_blank())
+
+ratios = (bigBoundBox[4] - bigBoundBox[3]) / (smallBoundBox[4] - smallBoundBox[3])
+
+fieldsPlot = plot_grid(bigFullV, bigCollectiveV, bigFluctV, smallFullV, smallCollectiveV, smallFluctV, ncol = 3, labels = c("A", "B", "C", "", "", ""), label_size = 36, rel_heights = c(1.26,1))
+
+# Making a guide plot
+## Try making a square guide
+gridPlot = expand.grid(Heading = seq(from = -pi, to = pi, by = pi/30), Speed = seq(from = 0, to = 10, by = 0.5))
+cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
+
+gridLegend = ggplot(gridPlot, aes(Heading, Speed, alpha=Speed, fill = Heading)) + geom_tile() + scale_fill_gradientn(colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha=F, fill=F) + scale_x_continuous(name = "Direction", breaks = c(-pi,0,pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) +
+  scale_y_continuous(name=expression(paste("Speed (",mu,"m/s)",sep="")), breaks = c(0,10))
+## Try making a radial guide
+
+nextGrid = expand.grid(X = seq(from = -10, to = 10, by = 0.25), Y = seq(from = -10, to = 10, by = 0.25)) %>%
+  mutate(Heading = atan2(Y,X), Speed = sqrt(X^2 + Y^2)) %>% filter(Speed <= 10)
+
+colorWheelGuide = ggplot(nextGrid, aes(X, Y, fill = Heading, alpha = Speed)) + geom_tile() + scale_fill_gradientn(colours = cbPalette, limits = c(-pi,pi)) + guides(fill=F,alpha=F) +
+  annotate("segment", x = 0, y = 0, xend = 10, yend = 0, linetype = 2, size = 1) +
+  annotate("segment", x = 0, y = 0, xend = sqrt(30), yend = sqrt(70), arrow = arrow(length = unit(0.5, "cm")), size = 1) +
+  annotate("text", label = "theta", x = 3, y = 1.5, parse = T, size = 8) + 
+  annotate("text", label = "0", x = 0, y = -2, size = 8) +
+  annotate("text", label = "10", x = 8, y = -2, size = 8) +
+  annotate("text", label = "|v|", x = 4, y = -2.1, size = 10) +
+  annotate("rect", xmin = -11, xmax = 11, ymin = -11, ymax = 11, fill = NA, color = "black") + coord_fixed() +
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.line = element_blank(), axis.ticks = element_blank(), panel.border = element_rect(linetype = 1, fill=NA))
+
+(figVFPlot = ggdraw() + draw_plot(fieldsPlot) + draw_plot(colorWheelGuide, x = 0.19, y = 0.23, width = 0.33, height = 0.33))
+save_plot(paste(projectFolder, "Figure_GettingFluctuations.pdf", sep = "/"), figVFPlot, base_width = 15, base_height = 9)
+```
+
+# Spatial correlations in fluctuations
+
+## Calculate pair-wise correlations and spatial averages
+
+I calculate the velocity and directional correlations on the velocity fluctuation vector fields for 15 frames sampled for each video. These data are then saved for future processing for each video. Currently there are 23 datasets that can be processed. The correlation value for each distance bin is averaged between the sampled frames.
+
+Calculate the correlations on the saved sampled frames for each animal.
+
+
+```{r correlationProfiles, cache=T, echo=F, dependson="sampleFrames"}
+if (!file.exists(paste(projectFolder, "Data_Processed", "correlationProfiles.rds", sep = "/"))) {
+  animalVectors = read_rds(paste(projectFolder, "fluctuationVectors.rds", sep = "/"))
+  nestedVelocity = select(animalVectors, folder, Frame, X, Y, vX, vY) %>% group_by(folder, Frame) %>% nest(.key = "velocityField")
+  nestedFluctuation = select(animalVectors, folder, Frame, X, Y, fluctX, fluctY) %>% group_by(folder, Frame) %>% nest(.key = "fluctField")
+  nestedData = inner_join(nestedVelocity, nestedFluctuation) %>% anti_join(invalidSampleFrames)
+
+
+  animalVectors = nestedData %>% partition(folder) %>% cluster_library("purrr") %>% cluster_library("dplyr") %>% cluster_library("scalefree") %>%
+    mutate(correlationFunction = map2(velocityField, fluctField, possibly(function(x,y) {calcCorrelationFunction(x,y, 3600)}, NA))) %>% collect() %>%
+    ungroup()
+  # Check the returns that gave NA!!! Why do they give NA?
+  
+  correlationProfiles = select(animalVectors, folder, Frame, correlationFunction)
+  write_rds(correlationProfiles, paste(projectFolder, "correlationProfiles.rds", sep="/"))
+  rm(list = c("animalVectors"))
+}
+```
+
+
+
+## Calculate correlation profile properties per-frame
+
+Here we will calculate the properties of each correlation profile from each frame. Later we can compare this to a per-animal calculation.
+
+```{r correlationStats, cache=T, dependson="correlationProfiles"}
+source(paste(projectFolder,"src","Step_3_Correlation_Stats.R", sep = "/"))
+```
+
+
+## Plot out the scale-free pattern in correlation length vs.size.
+
+Now we need to get the correlation lengths and animal sizes of all animals, over all frames. We need to measure the mean animal size (with error) and the mean correlation length (with error). This will be used to plot out the first figure. We show this measure for velocity, direction, and speed correlations.
+
+
+```{r allCorrLengthsPlot, cache=TRUE, dependson="adjustToRealUnits"}
+mylm = lm(data = perFrameAvgCorrStats, vZero_mean ~ EquivalentDiameter_mean)
+mylmSummary = summary(mylm)
+alpha = mylm$coefficients
+
+# velocity scale-free correlations
+breakSeq = seq(200, 1500, by = 650)
+
+(vZeroPlot = ggplot(perFrameAvgCorrStats, aes(EquivalentDiameter_mean, vZero_mean)) + geom_point(size=2, color="blue") + 
+    geom_errorbar(aes(ymax=vZero_mean + vZero_sd / sqrt(numFrames), ymin=vZero_mean - vZero_sd / sqrt(numFrames)), color="blue") +
+    geom_errorbarh(aes(xmax=EquivalentDiameter_mean + EquivalentDiameter_sd / sqrt(numFrames), xmin=EquivalentDiameter_mean-EquivalentDiameter_sd / sqrt(numFrames)), color="blue") +
+    stat_smooth(method="lm", formula = y ~ -1+x, se = F,size=1,alpha=0.3, color="blue") + xlab(expression(paste("Animal Diameter (",mu,"m)",sep=""))) + 
+    ylab(expression(paste(phi[V]," (",mu,"m)",sep=""))) + scale_x_continuous(breaks = breakSeq))
+save_plot(filename = "velocityCorrLengthSize.pdf", plot = vZeroPlot, base_height = 9, base_width = 9)
+
+
+# Directional scale-free correlations
+(dZeroPlot = ggplot(perFrameAvgCorrStats, aes(EquivalentDiameter_mean, dZero_mean)) + geom_point(size=2, color="green") + 
+    geom_errorbar(aes(ymax=dZero_mean + dZero_sd / sqrt(numFrames), ymin=dZero_mean - dZero_sd / sqrt(numFrames)), color="green") + guides(color=F) +
+    geom_errorbarh(aes(xmax=EquivalentDiameter_mean + EquivalentDiameter_sd / sqrt(numFrames), xmin=EquivalentDiameter_mean - EquivalentDiameter_sd / sqrt(numFrames)), color="green") +
+    stat_smooth(method="lm", formula = y ~ -1+x, se = F,size=1,alpha=0.3, color="green") + 
+    ylab(expression(paste(phi[D]," (",mu,"m)",sep=""))) + scale_x_continuous(expression(paste("Animal Diameter (",mu,"m)",sep="")), breaks = breakSeq))
+save_plot(filename = "directionCorrelationLengthSize.pdf", plot = dZeroPlot, base_height = 9, base_width = 9)
+
+
+# Speed scale-free correlations
+(sZeroPlot = ggplot(perFrameAvgCorrStats,aes(EquivalentDiameter_mean, sZero_mean)) + geom_point(size=2, color="red") + 
+    geom_errorbar(aes(ymax=sZero_mean + sZero_sd / sqrt(numFrames), ymin=sZero_mean - sZero_sd / sqrt(numFrames)), color="red") + 
+    geom_errorbarh(aes(xmax=EquivalentDiameter_mean + EquivalentDiameter_sd / sqrt(numFrames), xmin=EquivalentDiameter_mean - EquivalentDiameter_sd / sqrt(numFrames)), color="red") +
+    stat_smooth(method="lm", formula = y ~ -1+x, se = F,size=1,alpha=0.3, color="red") + 
+    ylab(expression(paste(phi[S]," (",mu,"m)",sep=""))) + scale_x_continuous(expression(paste("Animal Diameter (",mu,"m)",sep="")), breaks = breakSeq))
+save_plot(filename = "speedCorrelationLengthSize.pdf", plot = sZeroPlot, base_height = 9, base_width = 9)
+
+(allCorrLengthsPlot = plot_grid(vZeroPlot, dZeroPlot, sZeroPlot, ncol=1))
+save_plot("allCorrLengths.pdf", allCorrLengthsPlot, base_width = 9, base_height = 27)
+```
+
+## Stats of the linear fit models
+
+```{r linearModelsCorrLength, cache=T, dependson="allCorrLengthsPlot"}
+(velocityLM = summary(lm(vZero_mean ~ EquivalentDiameter_mean, data = perFrameAvgCorrStats)))
+(directionLM = summary(lm(dZero_mean ~ EquivalentDiameter_mean, data = perFrameAvgCorrStats)))
+(speedLM = summary(lm(sZero_mean ~ EquivalentDiameter_mean, data = perFrameAvgCorrStats)))
+```
+
+
+## Calculate average correlation profiles and corresponding statistics
+
+To measure the mean correlation profile for each animal.
+
+```{r meanProfiles,cache=TRUE, dependson = c("correlationProfiles", "meanSizes")}
+meanSizes = read_rds(paste(projectFolder, "Data_Processed", "meanSizes.rds", sep = "/"))
+meanProfiles = read_(paste(projectFolder, "meanProfiles.rds", sep = "/"))
+meanProfilesStats = read_csv(paste(projectFolder, "Data_Processed", "meanProfileStats.csv", sep = "/"))
+
+# Combine the zero crossings with the mean profiles, filter the erratic long tails.
+profilesWithCrossing = inner_join(meanProfiles, meanProfilesStats) %>% mutate(rescaledDist = domain/vZero) %>% 
+  filter(rescaledDist <= 2 & vCorr_mean > -1)
+
+(originalVelocityProfiles = profilesWithCrossing %>% ggplot(aes(domain, vCorr_mean, group=folder, color=EquivalentDiameter)) + geom_line() + geom_hline(yintercept=0, linetype=2) + xlab(expression(paste("Distance (",mu,"m)"))) + scale_y_continuous(name = expression(paste(C[V],"(x)", sep="")), breaks = c(0,0.5,1)) + scale_color_gradient(name = expression(paste("Size (",mu,"m)",sep="")), limits = c(200,1600), breaks = c(200,900,1600)))
+
+(originalDirectionProfiles = profilesWithCrossing %>% ggplot(aes(domain, dCorr_mean, group=folder, color=EquivalentDiameter)) + geom_line() + geom_hline(yintercept=0, linetype=2) + xlab(expression(paste("Distance (",mu,"m)"))) + scale_y_continuous(name = expression(paste(C[D], "(x)", sep="")), breaks = c(0,0.5,1)) + scale_color_gradient(high = "green", name = expression(paste("Size (",mu,"m)",sep="")), limits = c(200,1600), breaks = c(200,900,1600)))
+
+(originalSpeedProfiles = profilesWithCrossing %>% ggplot(aes(domain, sCorr_mean, group=folder, color=EquivalentDiameter)) + geom_line() + geom_hline(yintercept=0, linetype=2) + xlab(expression(paste("Distance (",mu,"m)"))) + scale_y_continuous(name = expression(paste(C[S],"(x)", sep="")), breaks = c(0,0.5,1)) + scale_color_gradient(high = "red", name = expression(paste("Size (",mu,"m)",sep="")), limits = c(200,1600), breaks = c(200,900,1600)))
+
+(rescaledProfilesPlot = profilesWithCrossing %>% ggplot(aes(rescaledDist, vCorr_mean, group=folder, color=EquivalentDiameter)) + geom_line() +  geom_hline(yintercept = 0, linetype=2) + ylab("K(x)") +
+    scale_x_continuous(name = expression(paste("x/",phi,sep="")), breaks = c(0, 1.0, 2.0)) +
+    scale_color_gradient(name = expression(paste("D (",mu,"m)",sep="")), limits = c(200,1600), breaks = c(200,900,1600)) + theme(legend.position = c(0.9, 0.8)))
+save_plot("rescaledAverageCorrelationProfiles.pdf", rescaledProfilesPlot, base_width = 9, base_height = 9)
+```
+
+
+# Correlation strength: decay rate and susceptibility
+
+## Susceptibility and Binder from Collective Order
+
+One way to measure the collective order is to create it from fluctuations in polarization.
+
+```{r susceptBinderFromOrder, cache=T, dependson="orderMeasures"}
+# Perform calculation for all order data.
+orderMeasures = read_rds("Data_Processed/relevantOrderData.rds")
+meanSizes = read_csv("Data_Processed/meanSizes.csv")
+
+orderMeasures = select(meanSizes, folder, EquivalentDiameter) %>% inner_join(orderMeasures)
+
+orderSuscept = orderMeasures %>% mutate(orderSquared = orderToCalc^2) %>% group_by(folder) %>% summarise(meanOrder = mean(orderToCalc), meanSquaredOrder = mean(orderSquared), meanSize = mean(EquivalentDiameter)) %>% mutate(susceptibility = meanSize * (meanSquaredOrder - meanOrder^2))
+
+(susceptOrderPlot = ggplot(orderSuscept, aes(meanSize, susceptibility)) + geom_point() + scale_y_continuous(expression(chi[o])) + scale_x_continuous(expression(paste("Diameter (",mu,"m)",sep=""))) + scale_color_gradient(TeX("\\sqrt{N}")))
+save_plot(filename = paste(projectFolder, "susceptFromOrder.pdf", sep = "/"), susceptOrderPlot)
+save_plot(paste(projectFolder, "susceptFromOrder.pdf", sep = "/"), susceptOrderPlot)
+
+# Calculate the Binder cumulant based on the unified order measure.
+orderBinder = orderMeasures %>% mutate(orderSquared = orderToCalc^2, orderQuart = orderToCalc^4) %>% group_by(folder) %>%
+  summarise(meanQuart = mean(orderQuart), meanSquared = mean(orderSquared), meanSize = mean(EquivalentDiameter)) %>% 
+  mutate(binderCumulant = 1 - meanQuart / (3 * meanSquared^2))
+(allBinder = ggplot(orderBinder, aes(meanSize, binderCumulant)) + geom_point() + scale_y_continuous("U") + 
+    scale_x_continuous(expression(paste("Diameter (",mu,"m)", sep=""))) + scale_color_gradient(TeX("\\sqrt{N}")))
+
+# Get the relationship between effective noise an susceptibility.
+susceptibilityBinned = energyMeasures %>% inner_join(orderMeasures) %>% mutate(ratioBin = cut(energyRatio, breaks = seq(from = -1, to = 1.1, by = 0.25), right = T), sizeBin = cut(EquivalentDiameter, breaks = seq(from = 0, to = 1700, by = 250))) %>% mutate(orderSquared = orderToCalc^2) %>% group_by(ratioBin, sizeBin) %>%
+  summarise(meanSize = mean(EquivalentDiameter), meanOrder = mean(orderToCalc), meanOrderSquared = mean(orderSquared)) %>%
+  mutate(susceptibility = meanSize * (meanOrderSquared - meanOrder^2))
+
+ggplot(susceptibilityBinned, aes(sizeBin, ratioBin, fill= susceptibility)) + geom_tile()
+```
+
+
+## Measuring based on the slope at the zero intercept
+
+We have found scale-free correlation signatures in our correlation profile data. But is this really the case? If we rescale the average profiles by the x-intercept. We measure the correlation decay rate by two methods: first, we can measure the slope at the zero-intercept, and second we can measure the integral of the correlation profile 
+
+```{r measureProfileSlopes, cache=T, dependson="rescaleMeanProfiles"}
+# Measure the slope at the zero crossing entries by isolating the closest five points to the zero crossing.
+# Get the 5 points for each correlation profile that are closest to the 0-intercept.
+closestToZero = profilesWithCrossing %>% mutate(distFromZero = abs(rescaledDist - 1)) %>% group_by(folder) %>% arrange(distFromZero) %>% slice(1:5) %>%
+  select(folder, rescaledDist, vCorr_mean, EquivalentDiameter)
+
+slopes = closestToZero %>% group_by(folder, EquivalentDiameter) %>% summarise(slope = correlationSlope(rescaledDist, vCorr_mean))
+
+(slopeAreaRelation = ggplot(slopes, aes(EquivalentDiameter, slope)) + geom_point() + scale_x_continuous(name=expression(paste("D (",mu,"m)",sep="")), breaks = c(200,1600)) + ylab(expression(paste("|C",italic("'"),"(", phi,")|", sep=""))) + stat_smooth(method="lm", color = "black", se = F))
+```
+
+
+## Measuring susceptibility (integral) of the correlation profile
+
+Here we do the cumulative sum of the correlation profiles for all the different sizes, up to the zero-intercept point. This is a measure of susceptibility according to Attanasi et al.
+
+```{r susceptibilityRelation, cache=T, dependson="correlationStats"}
+perFrameAvgCorrStats = read_csv("perFrameAvgCorrStats.csv") %>% mutate(Area = pi*(EquivalentDiameter_mean/2)^2)
+expFit = nls(vSuscept_mean ~ alpha * Area^(beta) + gamma, data = perFrameAvgCorrStats, start = list(alpha = 1.4, beta = 0.5, gamma = -100))
+linearFit = lm(vSuscept_mean ~ Area, data = perFrameAvgCorrStats)
+summary(expFit)
+
+# AIC comparison of models.
+AICModels = AIC(expFit, linearFit)
+pCorrect = exp((AICModels[[1,2]] - AICModels[[2,2]])/2)
+print(paste("Probability that linear model is right:", pCorrect))
+
+susceptibilityValues = perFrameAvgCorrStats %>% spread_predictions(expFit, linearFit) %>% select(folder, Area, EquivalentDiameter_mean, vSuscept_mean, expFit, linearFit, numFrames, vSuscept_sd, EquivalentDiameter_sd)
+
+(susceptibilityRelation = ggplot(susceptibilityValues, aes(Area, vSuscept_mean)) + geom_point() +
+  geom_line(aes(Area, expFit), size = 1) + 
+  # geom_line(aes(Area, linearFit), size = 1, alpha = 0.5, color = "red") + # No need for linear relationship
+  scale_x_continuous(TeX(paste("Area ($\\mu m^2$)",sep=""))) +
+  scale_y_continuous(expression(chi)))
+save_plot(filename = paste(projectFolder, "susceptibilityRelation.pdf", sep = "/"), susceptibilityRelation, base_width = 10, base_height = 8)
+
+susceptResid = susceptibilityValues %>% spread_residuals(expFit, linearFit)
+
+# Change this to be a good plot of residuals to include in the SI.
+MSR = susceptibilityValues %>% filter(complete.cases(.)) %>% summarise(MSEL = sum(linearFit^2), MSEE = sum(expFit^2))
+
+gatheredResiduals = susceptResid %>% gather(key = "Model", "Residual", expFit, linearFit)
+(residualsPlot = ggplot(gatheredResiduals, aes(EquivalentDiameter_mean, Residual, color = Model)) + geom_point() + geom_hline(yintercept = 0, linetype = 2) + ylab("Residuals") + facet_wrap(~ Model) + scale_color_manual(name = "Model", breaks = c("linearFit", "expFit"), labels = c("Linear", "Sublinear"), values = c("black", "red")) + theme(legend.position = "right") + xlab("Animal Size"))
+save_plot(filename = "residualsPlotAnimal.pdf", residualsPlot, base_width = 12, base_height = 9)
+
+(susceptibilityLinearFitPlot = plot_grid(susceptibilityRelation, residualsPlot, ncol = 1, labels = "AUTO"))
+save_plot(filename = "susceptibilityResiduals.pdf", susceptibilityLinearFitPlot, base_width = 24, base_height = 9)
+```
+
+
+## 
+
+There is a four-panel story here: the poor data collapse, the sublinear susceptibility, the decreasing order with size, and the increased phase transition slope.
+
+```{r scalingEffectsPlot, cache = T}
+
+(vZeroPlot = ggplot(perFrameAvgCorrStats, aes(EquivalentDiameter_mean, vZero_mean)) + geom_point(size=2) + 
+    geom_errorbar(aes(ymax=vZero_mean + vZero_sd / sqrt(numFrames), ymin=vZero_mean - vZero_sd / sqrt(numFrames))) +
+    geom_errorbarh(aes(xmax=EquivalentDiameter_mean + EquivalentDiameter_sd / sqrt(numFrames), xmin=EquivalentDiameter_mean-EquivalentDiameter_sd / sqrt(numFrames))) + stat_smooth(method="lm", formula = y ~ -1+x, se = F,size=1,alpha=0.3, color="blue") + 
+   scale_x_continuous(expression(paste("D (",mu,"m)",sep="")), breaks= c(200, 900, 1600)) + ylab(expression(paste(phi[V]," (",mu,"m)",sep=""))))
+
+velocityScaleFreePlot = plot_grid(originalVelocityProfiles + scale_x_continuous(expression(paste("Distance (",mu,"m)",sep="")), breaks = c(0, 500, 1000)) +
+                                    theme(legend.position = c(0.8, -0.5)), 
+                                  vZeroPlot + scale_x_continuous("", breaks = c(200, 900, 1600)) + 
+                                    theme(axis.title.x = element_blank()), labels = c("D", "E"), label_size = 24)
+
+susceptibilityScaling = plot_grid(rescaledProfilesPlot + scale_x_continuous("Rescaled Distance", breaks = c(0,1,2)) + guides(color=F), 
+                                  susceptibilityRelation + scale_x_continuous(expression(paste("D (",mu,"m)",sep="")), breaks = c(200, 900, 1600)), 
+                                  labels = c("F", "G"), label_size = 24)
+orderScaling = plot_grid(collectiveOrderSizePlot + scale_x_continuous(expression(paste("D (",mu,"m)", sep = "")), breaks = c(200, 900, 1600)), slopesPlotRatio +
+                           guides(color=F), diameterSlopePlot + 
+                           scale_x_continuous(expression(paste("D (",mu,"m)",sep="")), breaks= c(200, 900, 1600)), ncol = 3, labels = c("A", "B", "C"),label_size = 24)
+
+(correlationDecayPlot = plot_grid(orderScaling, velocityScaleFreePlot, susceptibilityScaling, ncol=1))
+save_plot("Figure_Criticality.pdf", correlationDecayPlot, base_width = 15, base_height = 12)
+
+
+# Direction and speed correlations SI plot.
+SIScaleFree = plot_grid(originalDirectionProfiles + xlab(""), dZeroPlot + xlab(""), originalSpeedProfiles, sZeroPlot + xlab(expression(paste("Animal Diameter D (",mu,"m)",sep=""))), labels="AUTO", ncol=2)
+save_plot(paste("Figure_SI_ScaleFree.pdf", sep = "/"), SIScaleFree, base_width = 10, base_height = 7)
+```
+
+
+```{r bindCumulantAnimal, cache=T, dependson = "relevantOrderData"}
+
+velocityFields = read_rds(paste(projectFolder, "IsingApproxFluctuation.rds", sep = "/"))
+allOrderMeasures = read_rds(paste(projectFolder, ""))
+
+binderCumulantDF = read_rds(vectorFieldsFile) %>% mutate(vEnergy = vX^2 + vY^2, uEnergy = uX^2 + uY^2) %>% mutate(vFourth = vEnergy^2) %>%
+  group_by(folder, Frame) %>% summarise(meanVEnergy = mean(vEnergy), meanUEnergy = mean(uEnergy), meanVFourth = mean(vFourth))
+
+binderCumulantDF = binderCumulantDF %>% mutate(energyRatio = meanUEnergy / meanVEnergy) %>% mutate(binderCumulant = 1 - (meanVFourth / (3*(meanVEnergy)^2)))
+
+binderWithOrder = inner_join(binderCumulantDF, orderMeasures)
+
+ggplot(binderCumulantDF, aes(energyRatio, binderCumulant)) + geom_point()
+```
+
+
+# Size effect on statistical properties in Placozoa
+
+So far we have assumed that the mean field properties within Placozoa, that is the mean speed, fluctuation magnitude, and collective magnitudes have all been relatively the same across animals. This is an assumption that the systems are generic and therefore can be compared across sizes in terms of correlation length. Here we test this assumption using the original, fluctuation, and collective vector fields.
+
+
+```{r orderParameterPlot, cache = T, dependson="sampleFrames"}
+# Get a list of appropriate frames to analyze for each animal, randomly sampled but valid.
+allFieldVectors = read_rds(paste(projectFolder, "fluctuationVectors.rds", sep = "/"))
+allFieldVectors = allFieldVectors[,-(3:4)]
+allFieldVectors = allFieldVectors %>% mutate(collectiveX = vX - fluctX, collectiveY = vY - fluctY) %>%
+  mutate(vMag = sqrt(vX^2 + vY^2), uMag = sqrt(fluctX^2 + fluctY^2), wMag = sqrt(collectiveX^2  + collectiveY^2))
+
+allFieldStats = allFieldVectors %>% group_by(folder) %>% summarise_each(funs(mean,sd), c(vMag, uMag, wMag)) %>% mutate(fluctRatio = uMag_mean / vMag_mean) %>%
+  ungroup() %>% mutate(folder = paste(masterDir, folder, sep = "/"))
+sizeFieldStats = meanSizes %>% inner_join(allFieldStats)
+summary(lm(vMag_mean ~ EquivalentDiameter, data = sizeFieldStats))
+summary(lm(uMag_mean ~ EquivalentDiameter, data = sizeFieldStats))
+summary(lm(wMag_mean ~ EquivalentDiameter, data = sizeFieldStats))
+
+(vMagPlot = ggplot(sizeFieldStats, aes(EquivalentDiameter, vMag_mean)) + geom_point() +
+  xlab(expression(paste("Diameter (",mu,"m)", sep=""))) +
+  ylab(TeX("$ \\bar{| \\textbf{v} |} \\; (\\mu m/s)$")))
+
+(wMagPlot = ggplot(sizeFieldStats, aes(EquivalentDiameter, wMag_mean)) + geom_point() +
+  xlab(expression(paste("Diameter (",mu,"m)", sep=""))) +
+  ylab(TeX("$ \\bar{| \\textbf{w} |} \\; (\\mu m/s)$")))
+
+(uMagPlot = ggplot(sizeFieldStats, aes(EquivalentDiameter, uMag_mean)) + geom_point() +
+  xlab(expression(paste("Diameter (",mu,"m)", sep=""))) +
+  ylab(TeX("$ \\bar{| \\textbf{u} |} \\; (\\mu m/s)$")))
+
+(vuMagPlot = ggplot(sizeFieldStats, aes(vMag_mean, uMag_mean)) + geom_point() + stat_smooth(method = "lm"))
+
+(ratioPlot = ggplot(sizeFieldStats, aes(EquivalentDiameter, fluctRatio)) + geom_point() + stat_smooth(method = "lm") +
+  xlab(expression(paste("Diameter (",mu,"m)", sep=""))) + 
+  ylab(expression(omega)))
+
+(orderParameterPlot = plot_grid(vMagPlot, uMagPlot, wMagPlot, ncol = 3, labels = "AUTO"))
+save_plot("orderParameterPlot.pdf", orderParameterPlot, base_width = 12, base_height = 5)
+
+allFrameStats = allFieldVectors %>% group_by(folder, Frame) %>% summarise_each(funs(mean,sd), c(vMag, uMag, wMag)) %>% ungroup() %>% 
+  mutate(folder = paste(masterDir, folder, sep = "/")) %>% inner_join(meanSizes)
+ggplot(allFrameStats, aes(vMag_mean, uMag_mean, color = EquivalentDiameter)) + geom_point(alpha = 0.4) + geom_abline(slope = 1, intercept = 0)
+```
+
+
+# Effect of mean field on correlation length
+
+We wish to test whether the velocity fluctuation correlation length is at all correlated with the magnitude of the cellular full velocities, fluctuation velocities, or the collective velocities. To do this I determine, for each frame of data, the original, collective, and fluctuation field. Then from these, for each vector, I get the magnitude. Finally, I calculate the mean magnitude of each quantity per frame.
+
+
+```{r meanFieldEffect, cache=T, dependson=c("susceptibilityRelation", "sampledFields")}
+fluctuationVectors = read_rds(paste(projectFolder, "fluctuationVectors.rds", sep = "/")) %>% mutate(vEnergy = vX^2 + vY^2, uEnergy = uX^2 + uY^2, wEnergy = wX^2 + wY^2)
+
+energyMeasures = fluctuationVectors %>% group_by(folder, Frame) %>% summarise(meanVE = mean(vEnergy), meanUE = mean(uEnergy), meanWE = mean(wEnergy)) %>%
+  mutate(energyRatio = meanUE / meanVE) %>% ungroup()
+
+shapeStats = read_rds(paste(projectFolder, "allShapeData.rds", sep = "/")) %>% select(folder, Frame, EquivalentDiameter, AspectRatio, Compactness)
+correlationStats = read_rds(paste(projectFolder, "correlationStats.rds", sep = "/"))
+orderMeasures = read_rds(paste(projectFolder, "allOrderMeasures.rds", sep = "/")) %>% mutate(order = sqrt(polarization^2 + rotation^2 + dilatation^2))
+
+orderCorrelations = inner_join(correlationStats, orderMeasures) %>% inner_join(energyMeasures) %>% inner_join(shapeStats)
+
+summary(lm(vZero ~ EquivalentDiameter + meanVE, data = orderCorrelations))
+
+meanedByAnimal = orderCorrelations %>% group_by(folder) %>% summarise_each(funs("mean","sd"), EquivalentDiameter, vZero, meanVE, meanUE, meanWE)
+ggplot(meanedByAnimal, aes(meanVE_mean, vZero_mean)) + geom_point()
+ggplot(meanedByAnimal, aes(meanUE_mean, vZero_mean)) + geom_point()
+ggplot(meanedByAnimal, aes(meanWE_mean, vZero_mean)) + geom_point()
+
+head(orderCorrelations)
+
+nestedAnimals = orderCorrelations %>% select(folder, Frame, vZero, meanVE, meanUE, meanWE) %>% group_by(folder) %>% nest(.key = "data")
+calcCorrs = function(x) {lm(x$vZero ~ x$meanVE)}
+nestedModels = nestedAnimals %>% mutate(VECorr = map(.f = function(x) {cor(x$vZero, x$meanVE)}, .x = data)) %>%
+  mutate(UECorr = map(.f = function(x) {cor(x$vZero, x$meanUE)}, .x = data)) %>%
+  mutate(WECorr = map(.f = function(x) {cor(x$vZero, x$meanVE)}, .x = data)) %>%
+  select(-data) %>% unnest() %>%
+  inner_join(meanedByAnimal)
+
+
+ggplot(nestedModels, aes(vZero_mean, UECorr)) + geom_point()
+ggplot(nestedModels, aes(vZero_mean, VECorr)) + geom_point()
+ggplot(nestedModels, aes(vZero_mean, WECorr)) + geom_point()
+```
+
+
+# FIGURES FOR PAPER
+
+## Figure 1
+
+
+
+
+## Figure 2
+```{r figure2}
+## Figure 2 Figures
+
+### Animal Figures ##
+
+# 2D and E (D is inset)
+profilesWithCrossing = read_rds("2D_corrProfiles.rds")
+corrLength = read_rds("2E_corrLengths.rds")
+
+originalVelocityProfiles = profilesWithCrossing %>% ggplot(aes(domain, vCorr_mean, group=folder, color=EquivalentDiameter)) + geom_line() + 
+  geom_hline(yintercept=0, linetype=2) + xlab(expression(paste("Distance (",mu,"m)"))) + 
+  scale_y_continuous(name = expression(paste(C[V],"(x)", sep="")), breaks = c(0,0.5,1)) +
+  scale_x_continuous(breaks = c(200,600,1000)) + 
+  scale_color_gradient(name = expression(paste("Size (",mu,"m)",sep=""), high = "blue", low = "red"), limits = c(200,1600), high = "blue", low = "red") + 
+  theme_bw() + guides(color = F) +
+  theme(axis.title=element_text(size = 20), axis.text=element_text(size = 18))
+
+
+vZeroPlot = ggplot(corrLength, aes(EquivalentDiameter_mean, vZero_mean)) + geom_point(aes(color = EquivalentDiameter_mean)) + geom_point(size=2) + 
+    geom_errorbar(aes(ymax=vZero_mean + vZero_sd / sqrt(numFrames), ymin=vZero_mean - vZero_sd / sqrt(numFrames))) +
+    geom_errorbarh(aes(xmax=EquivalentDiameter_mean + EquivalentDiameter_sd / sqrt(numFrames), xmin=EquivalentDiameter_mean-EquivalentDiameter_sd / sqrt(numFrames))) + stat_smooth(method="lm", formula = y ~ -1+x, se = F,size=1,alpha=0.3, color="blue") + 
+    scale_x_continuous(expression(paste("D (",mu,"m)",sep="")), breaks= c(200, 900, 1600)) + ylab(expression(paste(phi[V]," (",mu,"m)",sep=""))) +
+    scale_color_gradient(expression(paste("D (",mu,"m)",sep="")), breaks = c(250, 900, 1600), low = "red", high = "blue") + 
+    theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20), legend.key.height = unit(1.0, "cm"), legend.text = element_text(size = 18), legend.title = element_text(size = 18), legend.position = c(0.9, 0.35))
+
+(panel2C = ggdraw() + draw_plot(vZeroPlot) + draw_plot(originalVelocityProfiles, 0.2, 0.68, 0.36, 0.3))
+
+
+# 2G (F is inset)
+expFit = nls(vSuscept_mean ~ alpha * EquivalentDiameter_mean^(beta) + gamma, data = susceptibilityValues, start = list(alpha = 1.4, beta = 0.5, gamma = -100))
+linearFit = lm(vSuscept_mean ~ EquivalentDiameter_mean, data = perFrameAvgCorrStats)
+summary(expFit)
+susceptibilityFit = 0.5241
+
+
+susceptibilityValues = read_rds("2G_susceptibility.rds")
+rescaledProfilesPlot = profilesWithCrossing %>% ggplot(aes(rescaledDist, vCorr_mean, group=folder, color=EquivalentDiameter)) + geom_line() + 
+  geom_hline(yintercept = 0, linetype=2) + ylab("K(x)") + scale_x_continuous(name = expression(paste("x/",phi,sep="")), breaks = c(0, 1.0, 2.0)) + 
+  scale_color_gradient(high = "blue", low = "red") + guides(color = F) +
+  theme_bw() + theme(axis.title = element_text(size= 20), axis.text = element_text(size = 18))
+
+
+susceptibilityRelation = ggplot(susceptibilityValues, aes(EquivalentDiameter_mean, vSuscept_mean)) + geom_point(aes(color = EquivalentDiameter_mean), size = 0.5) + 
+  geom_point() + geom_line(aes(EquivalentDiameter_mean, expFit), size = 1, color = "red") + 
+  scale_x_continuous(expression(paste("D (",mu,"m)",sep="")), breaks = c(200,1600)) + scale_y_continuous(expression(chi)) + guides(color = F) +
+  theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20))
+
+(panel2D = ggdraw() + draw_plot(susceptibilityRelation) + draw_plot(rescaledProfilesPlot, 0.18, 0.7, 0.36, 0.3))
+
+
+### Simulation figures ##
+
+##################################### SPRING STRENGTH FIGURES ####################################
+
+
+# Sample simulation image
+criticalityFrame = read_rds("simulation_sample_frame_strength.rds")
+(Panel2E = ggplot(criticalityFrame, aes(X, Y, color = angle, alpha = speed)) + geom_point() + coord_fixed() + 
+    scale_color_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), 
+                          breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha = F) + 
+    theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank(), legend.text = element_text(size = 22), legend.key.height = unit(1.8,"cm"),
+          legend.title = element_text(size = 24, hjust = 0.5)))
+
+# Order Data
+orderDataSummary = read_rds("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/orderData_sim_strength.rds") %>%
+  group_by(Noise, Size) %>% summarise(meanOrder = mean(Order), sdOrder = sd(Order), count = n())
+(Panel2F = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + 
+  geom_errorbar(aes(ymax = meanOrder + sdOrder/sqrt(count), ymin = meanOrder - sdOrder/sqrt(count)), width = 0.05) + 
+  scale_y_continuous("Order") + scale_x_continuous(expression(mu), breaks = c(2,4,6,8)) + 
+  scale_color_gradient(TeX("\\sqrt{N}"), breaks = c(30, 75, 120), high = "blue", low = "red") + 
+  annotate("rect", ymax = Inf, ymin = -Inf, xmin = 3.2, xmax = 4, fill = "yellow", alpha = 0.5) +
+  theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20), legend.title = element_text(size = 24), 
+      legend.text = element_text(size = 20), legend.key.height = unit(1.8,"cm")))
+
+# Critical Range
+criticalRange = read_rds("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3C_NoiseOrderRelation_strength.rds")
+
+(criticalSlopesPlot = ggplot(criticalRange, aes(energyRatio, polarization, group = Size)) + 
+  geom_point(data = sample_frac(criticalRange, 0.1), alpha = 0.2) + stat_smooth(aes(color = sqrt(Size)), method = "lm", se = F) + 
+  scale_x_continuous(expression(paste(eta,"*",sep="")), breaks = c(0,0.5,1), limits = c(0,1)) + 
+  scale_color_gradient(low = "red", high = "blue") +
+  scale_y_continuous("Order", breaks = c(0,0.5,1), limits = c(0,1)) + guides(color = F)  + theme_bw() +
+  theme(axis.title = element_text(size= 20), axis.text = element_text(size = 18)))
+
+
+
+# Model Slopes
+modelSlopes = read_rds("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3D_NoiseSlope_strength.rds")
+(diameterSlopePlot = ggplot(modelSlopes, aes(Diam, slope)) + geom_point(alpha = 0.5) + xlab(TeX("Size (\\sqrt{N})")) +
+    ylab(expression(paste("O'(",eta,"*)", sep = ""))) + geom_line(aes(Diam, linear), size = 1, alpha = 0.5, color = "red") + 
+    geom_line(aes(Diam, exponential), size = 1) +
+  theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20)))
+
+(panel2G = ggdraw() + draw_plot(diameterSlopePlot) + draw_plot(criticalSlopesPlot, 0.53, 0.57, 0.47, 0.43))
+
+
+
+
+# Correlation stats.
+colorGradient = scale_fill_manual(expression(mu), values = c("red", "yellow", "blue"))
+perFrameAvgCorrStatsSim = read_rds("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/correlationStats_sim_strength.rds") %>%
+  filter(Noise %in% c(2, 3.6, 8.0)) # For noise use c(0.1, 0.35, 0.6)
+
+(VZeroPlotSim = perFrameAvgCorrStatsSim %>% ggplot(aes(sqrt(Size), vZero_mean, group = Noise)) + 
+  geom_ribbon(aes(ymax=vZero_mean + vZero_sd / sqrt(nObs), ymin=vZero_mean - vZero_sd / sqrt(nObs), fill = as.factor(Noise)), alpha = 0.3) +
+  geom_line() + geom_point(aes(fill = as.factor(Noise)), size = 3, pch=21) +
+  xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[v]," (a.u.)",sep=""))) + 
+  colorGradient + guides(fill = F, color = F) + 
+  theme(axis.title = element_text(size = 24), axis.text = element_text(size = 20)))
+
+boundsDF = data.frame(x = 15:100) %>% mutate(y = x, y2 = x^susceptibilityFit)
+
+(logLogInset = VZeroPlotSim + geom_line(data = boundsDF, aes(x, 0.4*y), group = 1, color = "blue", size = 2, linetype = 2) +
+  scale_x_log10(limits = c(10, 140), breaks = scales::trans_breaks("log10", function(x) 10^c(1,2)), labels = scales::trans_format("log10", scales::math_format(10^.x))) + 
+    scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^c(1,1.5)), labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+    theme_bw() + theme(axis.title = element_blank(), axis.text = element_text(size = 18)))
+(Panel2H = ggdraw() + draw_plot(VZeroPlotSim) + draw_plot(logLogInset, 0.17, 0.7, 0.4, 0.3))
+
+
+# Susceptibility plot
+critDF = filter(perFrameAvgCorrStatsSim, Noise == 3)
+(VSusceptPlot = perFrameAvgCorrStatsSim %>% ggplot(aes(sqrt(Size), vSuscept_mean, group = as.factor(Noise))) +
+  geom_ribbon(aes(ymax=vSuscept_mean + vSuscept_sd / sqrt(nObs), ymin=vSuscept_mean - vSuscept_sd / sqrt(nObs), fill = as.factor(Noise)), alpha = 0.3) +
+  geom_line() + geom_point(aes(fill = as.factor(Noise)), size = 3, pch=21) +
+  xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[s]," (a.u.)",sep=""))) + 
+  colorGradient +
+  theme(axis.title = element_text(size = 24), axis.text = element_text(size = 20), legend.key.height = unit(1.8,"cm"), 
+        legend.title = element_text(size = 20), legend.text = element_text(size = 18)))
+
+
+(logLogSuscept = VSusceptPlot + geom_line(data = boundsDF, aes(x,0.8*y2), size = 1.5, linetype = 2, group = 1, color = "red") +
+    scale_x_log10(limits = c(10, 140), breaks = scales::trans_breaks("log10", function(x) 10^c(1,2)), labels = scales::trans_format("log10", scales::math_format(10^.x))) + 
+    scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^c(1,1.5)), labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+    theme_bw() + theme(axis.title = element_blank(), axis.text = element_text(size = 18)))
+(Panel2I = ggdraw() + draw_plot(VSusceptPlot) + draw_plot(logLogSuscept + guides(fill = F), 0.15, 0.7, 0.3, 0.3))
+
+
+# Simulation schematic plot
+library(png)
+modelScheme = readPNG("model_scheme.png")
+modelRaster = rasterGrob(modelScheme)
+(modelSchemePlot = ggplot(perFrameAvgCorrStatsSim, aes()) + annotation_custom(modelRaster)) + coord_fixed(ratio=1)
+
+fullFigure = plot_grid(Panel2A + theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20)), 
+                       panel2C, panel2D, panel2B, Panel2E, Panel2F, Panel2H, Panel2I, panel2G, modelSchemePlot, nrow = 2, labels = "AUTO", label_size = 30)
+save_plot("NewFigure2_strength.pdf", fullFigure, base_width = 30, base_height = 10)
+
+
+
+############################################# NOISE STRENGTH FIGURES ################
+
+
+# Figure 2 using noise simulations
+# Sample simulation image
+# Sample simulation image
+criticalityFrame = read_rds("simulation_sample_frame_noise.rds")
+(Panel2E = ggplot(criticalityFrame, aes(X, Y, color = angle, alpha = speed)) + geom_point() + coord_fixed() + 
+    scale_color_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), 
+                          breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha = F) + 
+    theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank(), legend.text = element_text(size = 22), legend.key.height = unit(1.8,"cm"),
+          legend.title = element_text(size = 24, hjust = 0.5)))
+
+# Order Data
+orderDataSummary = read_rds("orderData_sim_noise.rds") %>%
+  group_by(Noise, Size) %>% summarise(meanOrder = mean(Order), sdOrder = sd(Order), count = n())
+(Panel2F = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + 
+    geom_errorbar(aes(ymax = meanOrder + sdOrder/sqrt(count), ymin = meanOrder - sdOrder/sqrt(count)), width = 0.05) + 
+    scale_y_continuous("Order") + scale_x_continuous(expression(eta), breaks = c(0.15,0.35,0.55)) + 
+    scale_color_gradient(TeX("\\sqrt{N}"), breaks = c(30, 75, 120), high = "blue", low = "red") + 
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.3, xmax = 0.4, fill = "yellow", alpha = 0.5) +
+    theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20), legend.title = element_text(size = 24), 
+          legend.text = element_text(size = 20), legend.key.height = unit(1.8,"cm")))
+
+# Critical Range
+criticalRange = read_rds("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3C_NoiseOrderRelation_noise.rds")
+
+(criticalSlopesPlot = ggplot(criticalRange, aes(energyRatio, polarization, group = Size)) + 
+    geom_point(data = sample_frac(criticalRange, 0.1), alpha = 0.2) + stat_smooth(aes(color = sqrt(Size)), method = "lm", se = F) + 
+    scale_x_continuous(expression(paste(eta,"*",sep="")), breaks = c(0,0.5,1), limits = c(0,1)) + 
+    scale_color_gradient(low = "red", high = "blue") +
+    scale_y_continuous("Order", breaks = c(0,0.5,1), limits = c(0,1)) + guides(color = F)  + theme_bw() +
+    theme(axis.title = element_text(size= 20), axis.text = element_text(size = 18)))
+
+
+
+# Model Slopes
+modelSlopes = read_rds("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3D_NoiseSlope_noise.rds")
+(diameterSlopePlot = ggplot(modelSlopes, aes(Diam, slope)) + geom_point(alpha = 0.5) + xlab(TeX("Size (\\sqrt{N})")) +
+    ylab(expression(paste("O'(",eta,"*)", sep = ""))) + geom_line(aes(Diam, linear), size = 1, alpha = 0.5, color = "red") + 
+    geom_line(aes(Diam, exponential), size = 1) +
+    theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20)))
+
+(panel2G = ggdraw() + draw_plot(diameterSlopePlot) + draw_plot(criticalSlopesPlot, 0.53, 0.57, 0.47, 0.43))
+
+# Correlation stats.
+colorGradient = scale_fill_manual(expression(eta), values = c("blue", "yellow", "red"))
+perFrameAvgCorrStatsSim = read_rds("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/correlationStats_sim_noise.rds") %>%
+  filter(Noise %in% c(0.2, 0.35, 0.6)) # For noise use c(0.1, 0.35, 0.6)
+
+(VZeroPlotSim = perFrameAvgCorrStatsSim %>% ggplot(aes(sqrt(Size), vZero_mean, group = Noise)) + 
+    geom_ribbon(aes(ymax=vZero_mean + vZero_sd / sqrt(nObs), ymin=vZero_mean - vZero_sd / sqrt(nObs), fill = as.factor(Noise)), alpha = 0.3) +
+    geom_line() + geom_point(aes(fill = as.factor(Noise)), size = 3, pch=21) +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[v]," (a.u.)",sep=""))) + 
+    colorGradient + guides(fill = F, color = F) + 
+    theme(axis.title = element_text(size = 24), axis.text = element_text(size = 20)))
+
+boundsDF = data.frame(x = 15:100) %>% mutate(y = x, y2 = x^susceptibilityFit)
+
+(logLogInset = VZeroPlotSim + geom_line(data = boundsDF, aes(x, 0.4*y), group = 1, color = "blue", size = 2, linetype = 2) +
+    scale_x_log10(limits = c(10, 140), breaks = scales::trans_breaks("log10", function(x) 10^c(1,2)), labels = scales::trans_format("log10", scales::math_format(10^.x))) + 
+    scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^c(1,1.5)), labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+    theme_bw() + theme(axis.title = element_blank(), axis.text = element_text(size = 18)))
+(Panel2H = ggdraw() + draw_plot(VZeroPlotSim) + draw_plot(logLogInset, 0.17, 0.7, 0.4, 0.3))
+
+
+# Susceptibility plot
+critDF = filter(perFrameAvgCorrStatsSim, Noise == 0.35)
+(VSusceptPlot = perFrameAvgCorrStatsSim %>% ggplot(aes(sqrt(Size), vSuscept_mean, group = as.factor(Noise))) +
+    geom_ribbon(aes(ymax=vSuscept_mean + vSuscept_sd / sqrt(nObs), ymin=vSuscept_mean - vSuscept_sd / sqrt(nObs), fill = as.factor(Noise)), alpha = 0.3) +
+    geom_line() + geom_point(aes(fill = as.factor(Noise)), size = 3, pch=21) +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[s]," (a.u.)",sep=""))) + 
+    colorGradient +
+    theme(axis.title = element_text(size = 24), axis.text = element_text(size = 20), legend.key.height = unit(1.8,"cm"), 
+          legend.title = element_text(size = 20), legend.text = element_text(size = 18)))
+
+
+(logLogSuscept = VSusceptPlot + geom_line(data = boundsDF, aes(x,0.8*y2), size = 1.5, linetype = 2, group = 1, color = "red") +
+    scale_x_log10(limits = c(10, 140), breaks = scales::trans_breaks("log10", function(x) 10^c(1,2)), labels = scales::trans_format("log10", scales::math_format(10^.x))) + 
+    scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^c(1,1.5)), labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+    theme_bw() + theme(axis.title = element_blank(), axis.text = element_text(size = 18)))
+(Panel2I = ggdraw() + draw_plot(VSusceptPlot) + draw_plot(logLogSuscept + guides(fill = F), 0.15, 0.7, 0.3, 0.3))
+
+
+# Simulation schematic plot
+library(png)
+modelScheme = readPNG("model_scheme.png")
+modelRaster = rasterGrob(modelScheme)
+(modelSchemePlot = ggplot(perFrameAvgCorrStatsSim, aes()) + annotation_custom(modelRaster)) + coord_fixed(ratio=1)
+
+fullFigure = plot_grid(Panel2A + theme(axis.title = element_text(size= 24), axis.text = element_text(size = 20)), 
+                       panel2C, panel2D, panel2B, Panel2E, Panel2F, Panel2H, Panel2I, panel2G, modelSchemePlot, nrow = 2, labels = "AUTO", label_size = 30)
+save_plot("NewFigure2_noise.pdf", fullFigure, base_width = 30, base_height = 10)
+
+partFigure = plot_grid(Panel2F, Panel2H, Panel2I, panel2G, nrow = 2, labels = "AUTO", label_size = 30)
+save_plot("NewFigure2_noise_partial.pdf", partFigure, base_width = 12, base_height = 10)
+```

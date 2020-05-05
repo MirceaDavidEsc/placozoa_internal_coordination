@@ -1,0 +1,688 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+# CONTROLS
+
+## Check size impact on all order parameters
+
+```{r allOrderParameters, cache = T}
+projectFolder = "D:/Mircea/Projects/RESEARCH/InternalCoordination/"
+animalsOrderData = read_rds(paste(projectFolder, "relevantOrderData.rds", sep = "/")) %>% mutate(rotation = abs(rotation))
+meanOrders = animalsOrderData %>% group_by(folder) %>% summarise_each(funs = c("mean", "sd"), c(polarization, rotation, dilatation, order, EquivalentDiameter)) %>%
+  select(folder, EquivalentDiameter_mean, Polarization = polarization_mean, Rotation = rotation_mean, Dilatation = dilatation_mean, Order = order_mean) %>%
+  gather(orderType, orderValue, Polarization:Order) %>%
+  mutate(orderType = factor(orderType, levels = c("Order", "Polarization", "Rotation", "Dilatation")))
+
+(allOrderPlots = ggplot(meanOrders, aes(EquivalentDiameter_mean, orderValue)) + geom_point() + stat_smooth(method = "lm") + 
+  facet_wrap(~ orderType) + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order"))
+save_plot(filename = paste(projectFolder, "allOrderSI.pdf", sep = "/"), plot = allOrderPlots, base_width = 9, base_height = 9)
+
+summary(lm(orderValue ~ EquivalentDiameter_mean, data = filter(meanOrders, orderType == "Dilatation")))
+
+```
+
+
+
+## Data collapse: using chi-square minimization instead of intercept.
+
+Currently we have followed the Cavagna and Zhang method of collapsing correlation curves, namely normalizing the domain by the zero-intercept. Thomas Gregor believes that this is unrealistic because it reduces the noise at one specific point to 0, effectively "pinning" that point, and therefore inflating the sigma on the actual correlation profiles. He suggests another method of using chi-square minimization to match the curves. The idea is to align all the curves to each other using this method, and then divide them through by their mean x-intercept.
+
+Rescaling by chi-square minimization, matching the areas under the curve. This gets rid of the pinning effect on the x-axis.
+
+
+```{r chiSquareMinimization, cache=T, dependson="rescaleMeanProfiles"}
+# Filter the profiles to get only the positive correlation regions.
+onlyPositive = meanProfiles %>% filter(meanVCorr >= 0)
+ggplot(meanProfiles, aes(domain, meanVCorr, group = folder)) + geom_line()
+
+chiSquareMin = function(dataframe, areaToMatch) {
+  area = trapz(dataframe$domain, dataframe$meanVCorr)
+  return(rescaled = dataframe$domain/area*areaToMatch)
+}
+
+# Take the first profile, rescale the domain so that the area under the curve is closest to 0.5
+nestedDF = onlyPositive %>% select(meanSize, domain, meanVCorr, folder) %>% group_by(meanSize, folder) %>% nest() %>%
+  mutate(rescaledDomain = map2(data, 0.5, chiSquareMin)) %>% unnest() %>% rename()
+
+(minimizedDistance = ggplot(nestedDF, aes(rescaledDomain, meanVCorr, group = folder, color = meanSize)) + geom_line() + xlab("Rescaled Distance") + ylab("Correlation") + scale_color_continuous("Size", limits = c(200, 1600)))
+save_plot("alternativeRescaling.pdf", minimizedDistance, base_width = 5, base_height = 5)
+```
+
+
+
+## Synthetic vector fields: making scrambled videos.
+
+```{r testingOpticalFlow, cache = T, dependson="sampleFrame"}
+exampleFrame = framesDF %>% arrange(folder, Frame) %>% group_by(folder) %>%
+  slice(1)
+
+chosenFolders = exampleFrame$folder[1:5]
+for (thisFolder in chosenFolders) {
+  folder = basename(thisFolder)
+
+  if (file.exists(paste(projectFolder, "ScrambleControl", folder, "scrambled.avi", sep = "/"))) 
+    next  
+  setwd(thisFolder)
+  print(thisFolder)
+  if (!file.exists("image_1.jpg")) {
+    system("ffmpeg -i movie.avi -t 00:00:01 -q:v 0 image_%d.jpg")
+  }
+  setwd(paste(projectFolder, "src", sep = ""))
+  sysComm = paste("python scrambleImages.py", thisFolder)
+  system(sysComm)
+  setwd(thisFolder)
+  system("ffmpeg -i scrambled_%d.jpg -vcodec mjpeg -q:v 0 -y scrambled.avi")
+}
+```
+
+## Calculate the correlations of scrambled images
+
+After making the optical flow using fishFlow (done on another computer) we then process the optical flow files and look for the correlation stucture there.
+
+```{r scrambleCorrelations, cache=T, dependson="testingOpticalFlow"}
+scrambleFolder = paste(projectFolder, "ScrambleControl", sep="")
+scrambleFlow = list.files(path = scrambleFolder, "*.hdf5", recursive = T, full.names = T)
+scrambleFlow = scrambleFlow[2:6]
+
+# Image width and height
+MAX_IMG_X = 1040
+MAX_IMG_Y = 1392
+
+if (!file.exists(paste(scrambleFolder, "/corrProfiles.rds", sep=""))) {
+  corrFunctions = list()
+  for (thisFlow in scrambleFlow) {
+    folder = basename(dirname(thisFlow))
+    print(folder)
+    velocities = h5read(thisFlow, "/velocity")
+    xVel = bigh5::reshapeArrayLongForm(velocities$x) %>% select(X = xc, Y = yc, Frame = zc, vX = val)
+    # Get dimensions of flow field to convert to real units.
+    MAX_X = max(xVel$X)
+    MAX_Y = max(xVel$Y)
+    pxPerVoxel = MAX_IMG_X / MAX_x
+    yVel = bigh5::reshapeArrayLongForm(velocities$y) %>% select(vY = val)
+    longformVelocity = bind_cols(xVel, yVel)
+    
+    framesToAnalyze = 2:28
+    wholeFieldList = list()
+    for (thisFrame in framesToAnalyze) {
+      print(thisFrame)
+      sampleField = filter(longformVelocity, Frame == thisFrame)
+      sampleField = sampleField %>% mutate(speed = sqrt(vX^2 + vY^2)) %>% mutate(speed = speed/pxPerMicrometer)
+      randomSpeedHist = ggplot(sampleField, aes(speed)) + geom_histogram() 
+  
+      
+      if (pxPerVoxel == 8) {
+        samplePlot = sampleField %>% select(-Frame, -speed) %>% quiverPlot(1, colormapped = T) + ggtitle(paste("Resolution = ",pxPerVoxel))
+        save_plot(paste(dirname(thisFlow), "/exampleField",pxPerVoxel,"_",thisFrame,".jpg", sep=""), samplePlot)
+      }
+      entireFieldCorr = sampleField %>% select(-Frame, -speed) %>% calcCorrelationFunction(sampleSize = 3600) %>%
+        mutate(domain = domain*pxPerVoxel/pxPerMicrometer)
+      entireFieldCorr$Frame = thisFrame
+      entireFieldCorr$resolution = pxPerVoxel
+      entireFieldCorrelations = ggplot(entireFieldCorr, aes(domain, vCorr)) + geom_point() + geom_line()
+      wholeFieldList[[length(wholeFieldList) + 1]] = entireFieldCorr
+    }
+    wholeFieldDF = bind_rows(wholeFieldList)
+    
+    # Get the correlation lengths for each profile
+    groupedProfiles = group_by(wholeFieldDF, Frame, resolution)
+    profilesPlot = ggplot(groupedProfiles, aes(domain, vCorr, group = Frame)) + geom_point() + geom_line() + xlim(0,1000) + ylim(-1,1) + ylab("C(x)") + xlab(expression(paste("Distance (",mu,"m)",sep="")))
+    save_plot(paste(dirname(thisFlow), "/corrProfiles.pdf", sep=""), profilesPlot, base_width = 9, base_height = 9)
+    
+    corrLengths = calcCorrelationLengths(groupedProfiles)
+    corrLengthPlot = ggplot(corrLengths,aes(Frame, vZero)) + geom_point() + geom_line() + xlab("Frame") + ylab(expression(paste(phi[v]," (",mu,"m)", sep="")))
+    save_plot(paste(dirname(thisFlow), "/corrLength.pdf", sep=""), corrLengthPlot, base_width = 9, base_height = 9)
+    
+    corrFunctions[[length(corrFunctions) + 1]] = corrLengths
+  }
+  write_rds(corrFunctions, paste(scrambleFolder, "/corrProfiles.rds", sep=""))
+}
+corrFunctions = read_rds(paste(scrambleFolder, "/corrProfiles.rds", sep=""))
+  
+thisFunctions = corrFunctions[[5]]
+ggplot(thisFunctions, aes(Frame, vZero)) + geom_point()
+``` 
+
+## Compare scrambled to animal fluctuation fields
+
+```{r animalFluctuationTimeSeries, cache=T}
+testFolder = "E:/ALL DATA/HighMagTracked/2015-01-06-2-Hammamatsu/"
+testFrames = 4480:4510
+dir.create("fluctuationTimeSeries")
+
+# Load the noise flow field for comparison
+velocities = h5read(paste(projectFolder,"ScrambleControl/2013-06-19-run_1/scrambled-tracks_8.hdf5",sep=""), "/velocity")
+xVel = bigh5::reshapeArrayLongForm(velocities$x) %>% select(X = xc, Y = yc, Frame = zc, vX = val)
+# Get dimensions of flow field to convert to real units.
+yVel = bigh5::reshapeArrayLongForm(velocities$y) %>% select(vY = val)
+longformVelocity = bind_cols(xVel, yVel)
+MAX_X = max(xVel$X)
+MAX_Y = max(xVel$Y)
+pxPerVoxel = MAX_IMG_X / MAX_X
+
+# Load the animal flow field.
+if (!file.exists(paste(projectFolder,"fluctuationTimeSeries/timeseriesData.rds", sep = ""))) {
+  animalFields = readDataAtFrame(paste(testFolder,"longformOpticalFlow.hdf5",sep=""), "longform", "longformFrameIndices", testFrames) %>% standardizePlacozoaVectors()
+  write_rds(dataToPlot, paste(projectFolder,"fluctuationTimeSeries/timeseriesData.rds", sep = ""))  
+}
+animalFields = read_rds(paste(projectFolder,"fluctuationTimeSeries/timeseriesData.rds", sep = ""))
+
+
+# Load the boundaries of the animal to segment noisy image.
+if (!file.exists("fluctuationTimeSeries/animalBoundary.rds")) {
+  animalBoundary = readDataAtFrame(paste(testFolder,"boundaryPaths.h5",sep=""), "boundaryPaths", "frameIndices", testFrames) %>% select(X = V1, Y = V2, Frame = V3) %>%
+    mutate(Y = X/pxPerMicrometer, X = Y/pxPerMicrometer)
+  write_rds(animalBoundary, "fluctuationTimeSeries/animalBoundary.rds")
+}
+animalBoundary = read_rds("fluctuationTimeSeries/animalBoundary.rds")
+
+
+if (!file.exists("fluctuationTimeSeries/selectedPlots.rds")) {
+  # Plot out the flow fields, save a select number of frames for a grid plot.
+  plotList = list()
+  framesToSave = c(4494, 4499, 4504)
+  frameOffset = min(testFrames) - 1
+  for (thisFrame in testFrames) {
+    velocityField = filter(animalFields, Frame == thisFrame) %>%
+      mutate(X = floor(X - mean(X) + MAX_X/2), Y = floor(Y - mean(Y) + MAX_Y/2)) %>%
+      mutate(bulk = identifyBoundary(X, Y, marginPercent = 0.1, tryAlpha = 5))
+  
+    fluctuationField = velocityField %>% filter(bulk) %>% select(-bulk, -Frame) %>% calculateFluctuationField() %>%
+      mutate(relX = relX*pxPerVoxel/pxPerMicrometer, relY = relY*pxPerVoxel/pxPerMicrometer)
+    
+    fluctuationFieldHighlight = fluctuationField %>% quiverPlot(1,T) + guides(alpha = F, fill = F)
+    save_plot(paste("fluctuationTimeSeries/Frame",thisFrame,".pdf",sep=""), fluctuationFieldHighlight)
+    
+    if (thisFrame %in% framesToSave) {
+      plotList[[length(plotList) + 1]] = fluctuationFieldHighlight
+    }
+    
+    
+    noiseField = longformVelocity %>% filter(Frame == thisFrame - frameOffset) %>% select(-Frame)
+    noiseFieldPlot = noiseField %>% quiverPlot(1,T) + guides(fill = F, alpha=F)
+    save_plot(paste("fluctuationTimeSeries/FullField",thisFrame,".pdf",sep=""), noiseFieldPlot)
+    
+    noiseInAnimal = inner_join(noiseField, velocityField, by = c("X", "Y")) %>%
+      select(X, Y, vX = vX.x, vY = vY.x, bulk)
+    
+    fluctNoiseAnimal = noiseInAnimal %>%
+      filter(bulk) %>%  select(-bulk) %>% calculateFluctuationField() %>%
+      mutate(relX = relX*pxPerVoxel/pxPerMicrometer, relY = relY*pxPerVoxel/pxPerMicrometer)
+    noiseFluctPlot = fluctNoiseAnimal %>% quiverPlot(1, T) + guides(fill = F, alpha = F)
+    save_plot(paste("fluctuationTimeSeries/Noise",thisFrame,".pdf", sep=""), noiseFluctPlot)
+  
+    if (thisFrame %in% framesToSave) {
+      plotList[[length(plotList) + 1]] = noiseFluctPlot
+    }
+  }
+  thesePlots = plotList[c(1,3,5,2,4,6)]
+  write_rds(thesePlots, "fluctuationTimeSeries/selectedPlots.rds")
+}
+thesePlots = read_rds("fluctuationTimeSeries/selectedPlots.rds")
+
+titles = c("REAL, 0 s", "REAL, 2.5 s", "REAL, 5 s", "ARTIFICIAL, 0 s", "ARTIFICIAL, 2.5 s", "ARTIFICIAL, 5 s")
+for (i in 1:length(thesePlots)) {
+  thesePlots[[i]] = thesePlots[[i]] + scale_x_continuous(breaks = c(-200, 0, 200)) + scale_y_continuous(breaks = c(-200,0,200)) + ggtitle("")
+}
+
+
+(artificialVsRealPlot = plot_grid(plotlist = thesePlots, ncol = 3, labels = c("R 0.0 s", "R 2.5 s", "R, 5.0 s", "A 0.0 s", "A 2.5 s", "A 5.0 s")))
+save_plot("fluctuationTimeSeries/timeseries.pdf", artificialVsRealPlot, base_width = 27, base_height = 15)
+
+
+noiseField1 = longformVelocity %>% filter(Frame == 2) %>% select(-Frame) %>% quiverPlot(1,T) + guides(fill = F, alpha=F)
+noiseField2 = longformVelocity %>% filter(Frame == 3) %>% select(-Frame) %>% quiverPlot(1,T) + guides(fill = F, alpha=F)
+(artificialFieldsComparison = ggdraw() +
+  draw_plot(noiseField1, 0, 0.5, 0.25, 0.5) +
+  draw_plot(noiseField2, 0, 0, 0.25, 0.5) +
+  draw_plot(artificialVsRealPlot, 0.25, 0, 0.75, 1) +
+  draw_plot_label(label = c("A","B","C"), x = c(0, 0, 0.25), y = c(1, 0.5, 1), size = 24))
+save_plot(filename = "fluctuationTimeSeries/artificialVsReal.pdf", artificialFieldsComparison, base_width = 27, base_height = 15)
+```
+
+## Correlations from noise on a recording of a dead animal
+
+```{r deadAnimalControl, cache=T}
+deadControlFolder = paste(projectFolder, "deadControls", sep="")
+controlField = h5read(paste(deadControlFolder, "patch.hdf5", sep="/"), "velocity")
+xVel = bigh5::reshapeArrayLongForm(controlField$x) %>% select(X = xc, Y = yc, Frame = zc, vX = val)
+yVel = bigh5::reshapeArrayLongForm(controlField$y) %>% select(vY = val)
+longformVelocity = bind_cols(xVel, yVel) %>% standardizePlacozoaVectors()
+
+(measurementNoisePlot = longformVelocity %>% filter(Frame == 2) %>% select(-Frame) %>% quiverPlot(1, T))
+save_plot(paste(deadControlFolder,"measurementNoiseField.jpg", sep = "/"), measurementNoisePlot)
+
+animalBounds = read_csv("deadControls/MaskBoundary.csv") %>% mutate(Y = 1040 - Y) %>%
+  mutate(flowX = X/pxPerVoxel, flowY = Y/pxPerVoxel)
+inPoly = point.in.polygon(longformVelocity$X, longformVelocity$Y, animalBounds$flowX, animalBounds$flowY)
+labeledVelocity = longformVelocity %>% mutate(inPoly = inPoly)
+(labelPlot = filter(labeledVelocity, Frame == 2) %>% ggplot(aes(X, Y, fill = as.factor(inPoly))) + geom_tile() + coord_fixed())
+rm(list = "longformVelocity")
+
+relevantVelocity = filter(labeledVelocity, inPoly != 0)
+# Measure the animal size.
+size = nrow(relevantVelocity %>% filter(Frame == 1)) * (pxPerVoxel/pxPerMicrometer)^2
+
+(noiseFlowPlot = filter(relevantVelocity, Frame == 2) %>% mutate(X = X*pxPerVoxel/pxPerMicrometer, Y = Y*pxPerVoxel/pxPerMicrometer) %>%
+    select(-Frame, -inPoly) %>% quiverPlot(1, T) + guides(alpha=F, fill=F))
+save_plot("deadControls/noiseFlow.pdf", noiseFlowPlot)
+
+corrList = list()
+
+if (!file.exists("deadControls/corrProfiles.rds")) {
+  framesToAnalyze = seq(from = 2, to = max(relevantVelocity$Frame), by = 10)
+  for (thisFrame in 2:max(relevantVelocity$Frame)) {
+    thisFrameV = filter(relevantVelocity, Frame == thisFrame)
+    thisFrameV %>% select(-Frame, -inPoly) %>% quiverPlot(1, T)
+    correlations = select(thisFrameV, -Frame, -inPoly) %>% calcCorrelationFunction() %>% mutate(Frame = thisFrame)
+    corrList[[length(corrList) + 1]] = correlations
+  }
+  corrDF = bind_rows(corrList)
+  write_rds(x = corrDF, path = "deadControls/corrProfiles.rds")
+}
+corrDF = read_rds("deadControls/corrProfiles.rds") %>% mutate(domain = domain*pxPerVoxel/pxPerMicrometer)
+
+# Label animal as dead
+corrLengths = corrDF %>% group_by(Frame) %>% nest(.key = corrProfile) %>% mutate(corrLength = map(corrProfile, mapFirstZero)) %>%
+  select(Frame, corrLength) %>% unnest() %>% spread(corrType, corrVal) %>% ungroup() %>% summarise(vZero_mean = mean(vZero), vZero_sd = sd(vZero))
+corrLengths$folder = "DEAD"
+corrLengths$EquivalentDiameter_mean = sqrt(4/pi*size)
+corrLengths$numFrames = 300
+
+zeroCrossing = read_csv("allCorrelationLengths.csv")
+zeroCrossingDF = bind_rows(corrLengths, zeroCrossing)
+
+(deadControlPlot = ggplot(zeroCrossingDF, aes(EquivalentDiameter_mean, vZero_mean, color = folder == "DEAD")) + geom_point() + geom_errorbar(aes(ymax = vZero_mean + vZero_sd/sqrt(numFrames), ymin = vZero_mean - vZero_sd/sqrt(numFrames))) + 
+  geom_errorbarh(aes(xmax = EquivalentDiameter_mean + EquivalentDiameter_sd/sqrt(numFrames), 
+                     xmin = EquivalentDiameter_mean - EquivalentDiameter_sd/sqrt(numFrames))) + 
+  xlab(expression(paste("Animal Diameter (",mu,"m)",sep=""))) + 
+  ylab(expression(paste(phi[V]," (",mu,"m)",sep=""))) + 
+  scale_color_manual(values = c("blue", "red"), name = "Animal\nStatus", labels=c("Alive", "Dead")) + theme(legend.position = c(0.2, 0.8)))
+save_plot("deadControls/deadAnimal.pdf", deadControlPlot, base_width = 9, base_height = 9)
+
+deadAnimalImage = readJPEG("deadControls/deadAnimalSample.jpg")
+deadRaster = rasterGrob(deadAnimalImage)
+(deadAnimalPlot = ggplot(zeroCrossingDF, aes()) + annotation_custom(deadRaster))
+
+(deadControlFigure = ggdraw() +
+  draw_plot(deadAnimalPlot, 0.3, 0.7, 0.25, 0.25) +
+  draw_plot(noiseFlowPlot, 0, 0, 0.5, 1) +
+  draw_plot(deadControlPlot, 0.5, 0, 0.5, 1) +
+  draw_plot_label(c("A","B"), x = c(0, 0.5), y = c(1,1)))
+save_plot(paste(deadControlFolder,"deadControlFigure.pdf", sep="/"), deadControlFigure, base_width = 18, base_height = 7)
+```
+
+# Making video of fluctuations (for SI)
+
+```{r supplementVideo, cache=T}
+testFolder = "G:/ALL DATA/HighMagTracked/2015-01-06-2-Hammamatsu/"
+testFrames = 26325:26425  #21700:21800
+saveFolder = "SIVideo"
+dir.create(saveFolder)
+
+if (!file.exists("SIVideo/fieldData.rds")) {
+  velocityFields = readDataAtFrame(paste(testFolder,"longformOpticalFlow.hdf5", sep="/"), "longform", "longformFrameIndices", testFrames) %>%
+  standardizePlacozoaVectors() %>% mutate(X = X*pxPerVoxel/pxPerMicrometerHamm, Y = Y*pxPerVoxel/pxPerMicrometerHamm, 
+                                          vX = vX/pxPerMicrometerHamm, vY = vY/pxPerMicrometerHamm) %>%
+  group_by(Frame) %>% nest(.key = "VF") %>% mutate(FF = map(VF, calculateFluctuationField))
+  write_rds(velocityFields, "SIVideo/fieldData.rds")
+}
+velocityFields = read_rds("SIVideo/fieldData.rds")
+
+if (!file.exists("myout.avi")) {
+  buffer = c(-600,600)
+  breaks = seq(from = 0, to = 5000, by = 500)
+  for (thisFrame in 1:length(velocityFields$VF)) {
+    thisVF = velocityFields$VF[[thisFrame]]
+    thisFF = velocityFields$FF[[thisFrame]]
+    colnames(thisVF) = c("X", "Y", "vX", "vY")
+    shapeCenter = c(mean(thisVF$X), mean(thisVF$Y))
+    
+    vfPlot = quiverPlot(thisVF, 1, T) + guides(fill = F, alpha = F) + scale_x_continuous(breaks = breaks, limits = shapeCenter[[1]] + buffer) + scale_y_continuous(breaks = breaks, limits = shapeCenter[[2]] + buffer) + scale_alpha_continuous(limits = c(0,10)) + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), panel.grid.major = element_line(linetype = "dotted", size = 0.5, color = "black")) + ggtitle(paste("T = ", floor(thisFrame/2)," s"))
+    
+    ffPlot = quiverPlot(thisFF, 1, T) + theme(legend.position = c(0.1,0.6), axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) + scale_x_continuous(breaks = breaks, limits = buffer) + scale_y_continuous(breaks = breaks, limits = buffer) + scale_alpha_continuous(name = expression(paste("|v| (",mu,"m/s)", sep="")), limits = c(0,10)) + ggtitle("")
+    
+    thisFramePlot = plot_grid(vfPlot, ffPlot)
+    save_plot(paste(saveFolder,"/Frame_",thisFrame,".jpg", sep = ""), thisFramePlot, base_width = 18, base_height = 9)
+  }
+  system("ffmpeg -i SIVideo/Frame_%d.jpg -vcodec mjpeg -q:v 0 -r 30 myout.avi")
+}
+```
+
+
+# Control: Sensitivity of results to optical flow parameters
+
+```{r windowEffectRealData, cache = T, eval = F}
+controlDir  = paste(projectFolder, "FlowControl", sep = "")
+dataFiles = list.files(path = controlDir, pattern = "*.hd5")
+
+bigBoundary = readDataAtFrame(hdf5Identifier = "G:/ALL DATA/HighMagTracked/2015-02-12-run_1/boundaryPaths.h5", "boundaryPaths", "frameIndices", 464) %>%
+  slice(seq(1, to = n(), by = 10)) %>% rename(Y = V1, X = V2, Frame = V3) %>% mutate(X = X / 0.616, Y = (2048 - Y) / 0.616)
+smallBoundary = readDataAtFrame(hdf5Identifier = "G:/ALL DATA/HighMagTracked/2015-01-09-Hamm2/boundaryPaths.h5", "boundaryPaths", "frameIndices", 119) %>%
+  slice(seq(1, to = n(), by = 10)) %>% rename(Y = V1, X = V2, Frame = V3) %>% mutate(X = X / 0.616, Y = (2048 - Y) / 0.616)
+
+# Convert the data files into a long format.
+fieldsList = list()
+for (thisFile in dataFiles) {
+  big = str_detect(thisFile, "big")
+  if (big) {
+    useBoundary = bigBoundary
+  } else {
+    useBoundary = smallBoundary
+  }
+
+  windowSize = as.numeric(str_sub(str_extract(thisFile, "ws[0-9]+"), 3))
+  polyNParam = as.numeric(str_sub(str_extract(thisFile, "pn[0-9]{1}"), 3))
+
+
+  vfield = h5read(paste(controlDir,thisFile,sep = "/"), "velocity")
+  longformVelocityField = bigh5::reshapeArrayLongForm(vfield[[1]]) %>% cbind(bigh5::reshapeArrayLongForm(vfield[[2]])[,4]) %>%
+    standardizePlacozoaVectors()
+  thisFrame = filter(longformVelocityField, Frame == 2)
+
+  realFrame = thisFrame %>% mutate(X = X*8/0.616, Y = Y*8/0.616, vX = vX/0.616, vY = vY/0.616)
+
+  thisAnimal = realFrame %>% mutate(inPoly = point.in.polygon(X, Y, useBoundary$X, useBoundary$Y)) %>% filter(inPoly == 1) %>%
+    select(-Frame, -inPoly) %>% mutate(windowSize = windowSize, polyNParam = polyNParam, big = big)
+  fieldsList[[length(fieldsList) + 1]] = thisAnimal
+  H5close()
+}
+fieldsDF = bind_rows(fieldsList) %>% group_by(big, windowSize, polyNParam) %>% nest(.key = "velocityField")
+
+
+fieldsDF = fieldsDF %>% mutate(fluctuationField = map(velocityField, calculateFluctuationField)) %>%
+  mutate(correlationProfile = map(fluctuationField, calcCorrelationFunction))
+
+x = fieldsDF$correlationProfile[[1]]
+correlationProfiles = select(fieldsDF, big, windowSize, polyNParam, correlationProfile) %>% unnest()
+
+bigProfilePlot = filter(correlationProfiles, big) %>% ggplot(aes(domain, vCorr, color = as.factor(windowSize), group = c(windowSize))) +
+  geom_line() + ggtitle("Big Animal") + geom_hline(yintercept = 0) + scale_color_brewer(name = "Window Size")
+smallProfilePlot = filter(correlationProfiles, !big) %>% ggplot(aes(domain, vCorr, color = as.factor(windowSize), group = c(windowSize))) +
+  geom_line() + ggtitle("Small Animal") + geom_hline(yintercept = 0) + scale_color_brewer(name = "Window Size")
+
+plot_grid(bigProfilePlot, smallProfilePlot)
+
+nestByWindow = correlationProfiles %>% group_by(big, windowSize, polyNParam) %>% nest(.key = "correlationProfile") %>%
+  mutate(susceptibility = 0)
+
+for (ind in 1:length(nestByWindow$correlationProfile)) {
+  thisProfile = nestByWindow$correlationProfile[[ind]]
+  firstNegative = min(which(thisProfile$vCorr < 0))
+  thisProfile = thisProfile[1:firstNegative,]
+  nestByWindow$susceptibility[[ind]] = calculateSusceptibility(thisProfile$domain, thisProfile$vCorr)
+}
+
+nestByWindow = nestByWindow %>% group_by(big) %>% mutate(susceptChange = susceptibility/min(susceptibility))
+susceptibilityPlot = ggplot(nestByWindow, aes(windowSize, susceptibility, color = big)) + geom_point()
+susceptibilityDeltaPlot = ggplot(nestByWindow, aes(windowSize, susceptChange, color =)) + geom_point()
+
+onlySuscept = nestByWindow %>% select(big, windowSize, susceptibility) %>% spread(key = big, value = susceptibility) %>%
+  mutate(chiRatio = `TRUE`/`FALSE`)
+susceptibilityRatioPlot = ggplot(onlySuscept, aes(windowSize, chiRatio)) + geom_point() + ylab(expression(chi[L] / chi[S]))
+
+susceptibilityWindowPlot = plot_grid(bigProfilePlot, smallProfilePlot, susceptibilityPlot, susceptibilityRatioPlot, labels = "AUTO")
+save_plot(plot = susceptibilityWindowPlot, filename = "windowSizeControl.pdf", base_width = 9, base_height = 7)
+```
+
+## Control: compare optical flow to particle vector fields.
+
+```{r smoothingParticles, cache = T}
+controlDir = "fakefields"
+
+imgWidth = 984
+imgHeight = 961
+xConvert = imgWidth/256
+yConvert = imgHeight/256
+
+particleFields = list.files(path = paste(projectFolder,"fakefields",sep = ""), pattern = "*.dat", full.names = T)
+hdFiles = list.files(path = paste(projectFolder, "fakefields",sep=""), pattern = "*.hd5", full.names = T)
+
+densityMask = density = h5read(hdFiles[[1]], "density") %>% reshapeArrayLongForm() %>% filter(zc == 2) %>%
+  filter(val > 200) %>% select(-zc, -val)
+colnames(densityMask) = c("X", "Y")
+
+readFirstFrame = function(filename) {
+  vfield = h5read(filename, "velocity")
+  longformVelocityField = bigh5::reshapeArrayLongForm(vfield[[1]]) %>% cbind(bigh5::reshapeArrayLongForm(vfield[[2]])[,4]) %>%
+    standardizePlacozoaVectors()
+  
+  longformVelocityField$vY = -longformVelocityField$vY
+  thisFrame = filter(longformVelocityField, Frame == 2)
+  return(thisFrame)
+}
+
+# Load and calculate all the flow correlation profiles
+flowCorrelationsFile = paste(projectFolder, controlDir, "/flowCorrelations.rds", sep = "")
+
+cl = makeCluster(7)
+registerDoParallel(cl)
+flowCorrelations = foreach(filename = hdFiles, .packages = c("stringr", "dplyr", "rhdf5", "bigh5","bigsplines"), .export = c("calcCorrelationFunction", "calculateFluctuationField", "readFirstFrame", "standardizePlacozoaVectors", "densityMask")) %dopar% {
+  windowSize = as.numeric(str_sub(str_extract(filename, "ws[0-9]+"),3))
+  polynomNum = as.numeric(str_sub(str_extract(filename, "pn[0-9]+"),3))
+  kernelSize = as.numeric(str_sub(str_extract(filename, "k[0-9]+"),2))
+  firstFrameData = readFirstFrame(filename) %>% select(-Frame) %>% inner_join(densityMask) %>%
+    mutate(X = X * xConvert, Y = Y * yConvert)
+  fluctuationField = calculateFluctuationField(firstFrameData)
+  correlationProfile = calcCorrelationFunction(fluctuationField) %>% mutate(windowSize = windowSize, polynomNum = polynomNum, kernelSize = kernelSize)
+  return(correlationProfile)
+}
+flowCorrelationsDF = bind_rows(flowCorrelations)
+
+# Load and calculate all the particle correlation profiles
+particleCorrelations = foreach(filename = particleFields, .packages = c("stringr", "readr", "dplyr", "rhdf5", "bigh5","bigsplines"), .export = c("calcCorrelationFunction", "calculateFluctuationField", "readFirstFrame", "standardizePlacozoaVectors")) %dopar% {
+  particleData = read_delim(filename, col_names = F, delim = " ")
+  colnames(particleData) = c("X", "Y", "vX", "vY")
+  kernelSize = as.numeric(str_sub(str_extract(filename, "k[0-9]+"),2))
+  
+  particleFluctuations = calculateFluctuationField(particleData)
+  particleCorrelations = calcCorrelationFunction(particleFluctuations) %>% mutate(kernelSize = kernelSize)
+  return(particleCorrelations)
+}
+particleCorrelationsDF = bind_rows(particleCorrelations)
+
+# Match units.
+range(particleCorrelationsDF$domain)
+range(flowCorrelationsDF$domain)
+
+rescaledFlowCorrelations = flowCorrelationsDF %>% mutate(domain = domain / max(domain) * max(particleCorrelationsDF$domain))
+```
+
+## Compare the particle and flow correlation functions. Where do they match? Where do they diverge?
+
+```{r particleFlowAnalysis, cache=T}
+particleCorrelationsDF %>% filter(domain < 600) %>% ggplot(aes(domain, vCorr, color = kernelSize, group = kernelSize)) + geom_line() + theme(legend.position = "right") + xlim(0,500)
+
+
+# Plotting by kernel size.
+(windowSizeKernelEffectPlot = particleCorrelationsDF %>% ggplot(aes(domain, vCorr)) + geom_line(size = 2) + geom_line(data = rescaledFlowCorrelations, aes(color = windowSize, group = windowSize)) + geom_hline(yintercept = 0) + facet_wrap(~ kernelSize) + scale_x_continuous(name = "Distance (a.u.)", limits = c(0,400)) + scale_y_continuous(name = "C(x)", limits = c(-1,1)) + scale_color_continuous(name = expression(lambda), breaks = c(50,100,200)) + theme(legend.position = "right") + ggtitle("Gaussian Kernel Size"))
+save_plot("windowScalingEffect.pdf", windowSizeKernelEffectPlot, base_width = 13, base_height = 9)
+
+correlationLengths = particleCorrelationsDF %>% group_by(kernelSize) %>% nest(.key = correlations) %>% 
+  mutate(corrLength = map(correlations, mapFirstZero)) %>% select(-correlations) %>% unnest() %>% filter(corrType == "vZero") %>% select(-corrType, corrLength = corrVal)
+flowCorrelationLengths = rescaledFlowCorrelations %>% group_by(kernelSize, windowSize, polynomNum) %>% nest(.key = correlations) %>%
+  mutate(corrLength = map(correlations, mapFirstZero)) %>% select(-correlations) %>% unnest() %>% filter(corrType == "vZero") %>% select(-corrType, corrLength = corrVal)
+
+
+corrIntegrals = inner_join(correlationLengths, particleCorrelationsDF) %>% filter(domain <= corrLength) %>% group_by(kernelSize, corrLength) %>% 
+  nest(.key = correlations) %>% mutate(cumulativeCorr = map(correlations, mapSusceptFunct)) %>% 
+  select(-correlations) %>% unnest()
+flowCorrIntegrals = inner_join(flowCorrelationLengths, rescaledFlowCorrelations) %>% filter(domain < corrLength) %>% group_by(kernelSize, windowSize, polynomNum, corrLength) %>% nest(.key = correlations) %>% mutate(cumulativeCorr = map(correlations, mapSusceptFunct)) %>% 
+  select(-correlations) %>% unnest()
+
+corrIntegralsTogether = corrIntegrals %>% rename(particleQCorr = cumulativeCorr, particleCorrL = corrLength) %>% inner_join(flowCorrIntegrals) %>%
+  mutate(cumulativeRatio = cumulativeCorr / particleQCorr, corrLRatio = corrLength / particleCorrL, windowKernelRatio = windowSize / kernelSize)
+
+# Make all of the plots necessary for looking at error in this control parameter.
+jpegImg = readJPEG(paste(projectFolder, "fakefields/sampleImg.jpg", sep =""))
+imgRaster = rasterGrob(jpegImg)
+(sampleParticlePlot = ggplot(corrIntegralsTogether, aes()) + annotation_custom(imgRaster)) + coord_fixed(ratio=1)
+
+# Compare particle and flow fields.
+# Load the particle data
+filename = "D:/Mircea/Projects/RESEARCH/InternalCoordination/fakefields/VF_k51.dat"
+flowFilename = "D:/Mircea/Projects/RESEARCH/InternalCoordination/fakefields/FF_w800_h800_k51_ws45_pn7.hd5"
+particleData = read_delim(filename, col_names = F, delim = " ")
+colnames(particleData) = c("X", "Y", "vX", "vY")
+particleFluctuations = calculateFluctuationField(particleData) %>% mutate(speed = sqrt(fluctX ^ 2 + fluctY^2), angle = atan2(fluctY, fluctX))
+
+# Load the field
+firstFrameData = readFirstFrame(flowFilename) %>% select(-Frame) %>% inner_join(densityMask) %>%
+  mutate(X = X * xConvert, Y = Y * yConvert)
+fluctuationField = calculateFluctuationField(firstFrameData) %>% mutate(speed = sqrt(fluctX ^ 2 + fluctY^2), angle = atan2(fluctY, fluctX))
+
+# Troubleshoot miscommunication between velocity field and particle velocities
+(particleDataPlot = particleData %>% mutate(speed = sqrt(vX^2 + vY^2), angle = atan2(vY, vX)) %>% ggplot(aes(X, Y, color = angle, alpha = speed)) + geom_point(size = 1) + scale_color_gradientn(expression(theta), colours = cbPalette, limits = c(-pi, pi), breaks = round(c(-pi, 0, pi),2))) + scale_alpha_continuous("|v|") + coord_fixed() + theme(legend.position = "right") + theme(axis.title = element_blank(), axis.text = element_blank())
+
+
+(fieldDataPlot = firstFrameData %>% mutate(speed = sqrt(vX^2 + vY^2), angle = atan2(vY, vX)) %>% ggplot(aes(X, Y, color = angle, alpha = speed)) + geom_tile() + scale_color_gradientn(expression(theta), colours = cbPalette, limits = c(-pi, pi), breaks = round(c(-pi, 0, pi),2)) + scale_alpha_continuous("|v|") + coord_fixed() + theme(legend.position = "right") + theme(axis.title = element_blank(), axis.text = element_blank()))
+
+plot_grid(particleDataPlot, fieldDataPlot)
+
+(particleVelocityPlot = ggplot(particleFluctuations, aes(relX, relY, color = angle, alpha = speed)) + geom_point(size = 1) + scale_color_gradientn(expression(theta), colours = cbPalette, limits = c(-pi, pi), breaks = round(c(-pi, 0, pi),2)) + scale_alpha_continuous("|v|") + coord_fixed() + theme(legend.position = "right") + theme(axis.title = element_blank(), axis.text = element_blank()))
+
+
+(fieldVelocityPlot = ggplot(fluctuationField, aes(relX, relY, color = angle, alpha = speed)) + geom_tile() + scale_color_gradientn(expression(theta), colours = cbPalette, limits = c(-pi, pi), breaks = round(c(-pi, 0, pi),2)) + scale_alpha_continuous("|v|") + coord_fixed() + theme(legend.position = "right") + theme(axis.title = element_blank(), axis.text = element_blank()))
+
+
+
+(particlePlot = plot_grid(sampleParticlePlot, particleVelocityPlot, fieldVelocityPlot, labels = "AUTO", ncol = 3, label_size = 36))
+save_plot("particleFlowPlot.pdf", particlePlot, base_width = 18)
+
+(integralsRatioPlot = ggplot(corrIntegralsTogether, aes(kernelSize, cumulativeRatio, color = windowSize, group = windowSize)) + geom_point() + geom_line() + scale_x_continuous(name = "k") + scale_y_continuous(expression(paste(chi[f],"/",chi[p]))) + scale_color_continuous(name = expression(lambda)))
+
+(lambdaKRatioPlot = ggplot(corrIntegralsTogether, aes(windowKernelRatio, cumulativeRatio)) + geom_point() + xlab(expression(paste(lambda, "/", k))) + ylab(expression(paste(chi[f],"/",chi[p]))))
+
+(zoomRatioPlot = filter(corrIntegralsTogether, windowKernelRatio < 5) %>% ggplot(aes(windowKernelRatio, cumulativeRatio)) + geom_point() + xlab(expression(paste(lambda, "/", k))) + ylab(expression(paste(chi[f],"/",chi[p]))))
+
+ggplot(corrIntegralsTogether, aes(kernelSize, particleCorrL)) + geom_point() +scale_x_continuous("k", limits = c(0, 300)) + scale_y_continuous(expression(phi[v]), limits = c(0, 400))
+
+actualWindowUsed = 45
+zeroCrossings = read_csv(paste(projectFolder, "allCorrelationLengths.csv", sep = ""))
+smallestCrossing = min(zeroCrossings$vZero_mean)*0.752
+largestCrossing = max(zeroCrossings$vZero_mean)*0.616
+
+
+(windCorrLengthPlot = ggplot(corrIntegralsTogether, aes(windowSize/particleCorrL, cumulativeRatio)) + geom_point() + scale_x_log10(expression(paste(lambda, "/", phi)), breaks = c(0, 1, 5, 10, 15, 20)) + scale_y_continuous(expression(paste(chi[f],"/",chi[p]))) + geom_vline(xintercept = 1) + geom_vline(xintercept = actualWindowUsed / smallestCrossing, linetype = 2, color = "red") + geom_vline(xintercept = actualWindowUsed / largestCrossing, linetype = 2, color = "blue"))
+
+
+(errorMeasurePlot = plot_grid(integralsRatioPlot, lambdaKRatioPlot + ylab(""), windCorrLengthPlot + ylab(""), ncol = 3, labels = "AUTO", label_size = 36))
+save_plot("errorMeasureFlow.pdf", errorMeasurePlot, base_width = 18)
+```
+
+# Control: Compare ensemble and spatial averaging methods.
+
+```{r ensembleVsSnapshot, cache=T}
+correlationProfiles = read_rds(paste(projectFolder,"correlationProfiles.rds",sep="/")) %>% filter(!(folder %in% weirdFolders))
+
+# Need to re-multiply by 
+
+# 1. Calculate the correlation profile on each frame, get observables, average the observables.
+# Get the correlation profiles on each frame.
+snapshotQuantities = correlationProfiles %>% mutate(corrLength = map(correlationProfiles, mapFirstZero), susceptibility = map(correlationProfiles, mapSusceptFunct)) 
+corrLDF = select(snapshotQuantities, folder, Frame, corrLength) %>% unnest() %>% spread(key = corrType, val = corrVal)
+susceptibilityDF = snapshotQuantities %>% select(folder, Frame, susceptibility) %>% unnest()
+
+observablesDF = inner_join(susceptibilityDF, corrLDF) %>%
+  group_by(folder) %>% summarise(meanCorrL = mean(vZero), meanSuscept = mean(susceptibility), sdCorrL = sd(vZero), sdSuscept = sd(susceptibility), count = n())
+
+snapshotAndSize = inner_join(meanSizes, observablesDF)
+snapshotAndSize %>% ggplot(aes(EquivalentDiameter, meanSuscept)) + geom_point()
+
+
+# 2. Calculate the average correlation profile, bootstrapped on 80% of the data. Get the observable on the average correlation profile.
+bootstrapSample = 100
+ensembleSamples = list()
+cl = makeCluster(7)
+registerDoParallel(cl)
+ensembleSamples = foreach(ind = 1:bootstrapSample, .packages = c("dplyr", "tidyr", "purrr")) %dopar% {
+  averageProfiles = correlationProfiles  %>% group_by(folder) %>% sample_frac(0.5) %>% unnest() %>% group_by(folder, domain) %>% summarise(vCorr = mean(vCorr), dCorr = mean(dCorr), sCorr = mean(sCorr), count = n()) %>% filter(count > 20)
+  ensembleQuantities = averageProfiles %>% group_by(folder) %>% nest(.key = "corrProfile") %>% mutate(corrLength = map(corrProfile, mapFirstZero), susceptibility = map(corrProfile, mapSusceptFunct)) 
+  corrLDF = select(ensembleQuantities, folder, corrLength) %>% unnest() %>% spread(key = corrType, val = corrVal)
+  susceptibilityDF = ensembleQuantities %>% select(folder, susceptibility) %>% unnest()
+  ensembleObservables = inner_join(corrLDF, susceptibilityDF)
+}
+stopCluster(cl)
+ensembleAndSize = bind_rows(ensembleSamples) %>% group_by(folder) %>% summarise(meanEnsembleSuscept = mean(susceptibility), meanEnsembleCorrL = mean(vZero), sdEnsembleSuscept = sd(susceptibility), sdEnsembleCorrL = sd(vZero)) %>% inner_join(meanSizes) %>% mutate(sampleSize = bootstrapSample)
+
+
+ensembleSnapshotSize = ensembleAndSize %>% inner_join(snapshotAndSize)
+
+(ensembleVsSnapshotPhi = ggplot(ensembleSnapshotSize, aes(meanCorrL, meanEnsembleCorrL)) + geom_point() + geom_abline(slope = 1, intercept = 0) + scale_x_continuous(expression(paste("Spatial ",phi))) + scale_y_continuous(expression(paste("Ensemble ",phi))) + 
+  geom_errorbar(aes(ymin = meanEnsembleCorrL - sdEnsembleCorrL/sqrt(sampleSize), ymax = meanEnsembleCorrL + sdEnsembleCorrL/sqrt(sampleSize))) + geom_errorbarh(aes(xmin = meanCorrL - sdCorrL/sqrt(count), xmax = meanCorrL + sdCorrL/sqrt(count))))
+
+(ensembleVsSnapshotChi = ggplot(ensembleSnapshotSize, aes(meanSuscept, meanEnsembleSuscept)) + geom_point() + geom_abline(slope = 1, intercept = 0) + scale_x_continuous(expression(paste("Spatial ",chi))) + scale_y_continuous(expression(paste("Ensemble ",chi))) + 
+  geom_errorbar(aes(ymin = meanEnsembleSuscept - sdEnsembleSuscept/sqrt(sampleSize), ymax = meanEnsembleSuscept + sdEnsembleSuscept/sqrt(sampleSize))) +
+  geom_errorbarh(aes(xmin = meanSuscept - sdSuscept/sqrt(count), xmax = meanSuscept + sdSuscept/sqrt(count))))
+
+(ensembleVsSpatialPlot = plot_grid(ensembleVsSnapshotPhi, ensembleVsSnapshotChi, labels = "AUTO"))
+save_plot(filename = paste(projectFolder,"ensembleSnapshotSI.pdf",sep="/"), ensembleVsSpatialPlot, base_width = 10, base_height = 6)
+```
+
+
+# Effect of animal shape on correlation structure
+
+```{r shapeControl, cache=T, dependson = "ensembleVsSnapshot"}
+ggplot(ensembleSnapshotSize, aes(EquivalentDiameter, meanCorrL, color = FormFactor)) + geom_point()
+
+ggplot(ensembleSnapshotSize, aes(EquivalentDiameter, FormFactor, color = meanCorrL)) + geom_point() + theme(legend.position = "right")
+summary(glm(meanCorrL ~ FormFactor + EquivalentDiameter, data = ensembleSnapshotSize))
+  
+(circularityPlot = ggplot(ensembleSnapshotSize, aes(EquivalentDiameter, FormFactor)) + geom_point() + geom_hline(yintercept = 1, linetype = 2) + scale_x_continuous(expression(paste("Diameter (",mu,"m)", sep=""))) + scale_y_continuous(expression(paste("Circularity"))) + theme(legend.position = "right"))
+save_plot(filename = paste(projectFolder, "circularityEffect.pdf"), circularityPlot)
+
+(circularityEffect = ggplot(ensembleSnapshotSize, aes(FormFactor, meanCorrL/EquivalentDiameter)) + geom_point() + scale_x_continuous("Circularity") + scale_y_continuous(expression(paste(phi,"/L"))))
+(circularitySIPlot = plot_grid(circularityPlot, circularityEffect))
+save_plot(paste(projectFolder, "circularityEffect.pdf", sep="/"), circularitySIPlot, base_height = 6, base_width = 15)
+
+summary(lm(meanCorrL/EquivalentDiameter ~ FormFactor + EquivalentDiameter, data = ensembleSnapshotSize))
+```
+
+# Effect of animal speed on correlation structure.
+
+```{r speedEffect, cache=T}
+vFieldStatsByFrame = read_rds(paste(projectFolder, "animalVectorsReal.rds", sep = "")) %>% mutate(velMag = sqrt(vX^2 + vY^2), fluctMag = sqrt(fluctX^2 + fluctY^2), remX = vX - fluctX, remY = vY - fluctY) %>%
+    mutate(remMag = sqrt(remX^2 + remY^2)) %>% group_by(folder, Frame) %>%
+    summarise_each(funs(mean,sd), c(velMag, fluctMag, remMag))
+correlationLengths = read_rds(paste(projectFolder, "zeroCrossings.rds", sep = ""))
+
+fieldStatsCorrL = inner_join(correlationLengths, vFieldStatsByFrame)
+testFolder = unique(fieldStatsCorrL$folder)[[4]]
+thisField = filter(fieldStatsCorrL, folder == testFolder)
+remEffectPlot = ggplot(thisField, aes(remMag_mean, vZero)) + geom_point() + scale_x_continuous(expression(paste("|w| (",mu,"m/s)"))) + 
+  scale_y_continuous(expression(paste(phi," (",mu,"m)", sep = "")))
+fluctEffectPlot = ggplot(thisField, aes(fluctMag_mean, vZero)) + geom_point() + scale_x_continuous(expression(paste("|u| (",mu,"m/s)"))) + 
+  scale_y_continuous(expression(paste(phi," (",mu,"m)", sep = "")))
+velEffectPlot = ggplot(thisField, aes(velMag_mean, vZero)) + geom_point() + scale_x_continuous(expression(paste("|v| (",mu,"m/s)"))) + 
+  scale_y_continuous(expression(paste(phi," (",mu,"m)", sep = "")))
+
+uEffectPlot = ggplot(thisField, aes(remMag_mean, fluctMag_mean)) + geom_point() + scale_x_continuous(expression(paste("|v| (",mu,"m/s)"))) + 
+  scale_y_continuous(expression(paste("|u| (",mu,"m/s)")))
+
+effectOnPhi = plot_grid(velEffectPlot, fluctEffectPlot, remEffectPlot, ncol = 3, labels = "AUTO")
+save_plot(paste(projectFolder, "effectOnPhi.pdf", sep = ""), effectOnPhi, base_width = 18, base_height = 5)
+```
+
+
+## CONTROL: Compare average per-frame stats to per-animal average stats
+
+One aspect that deserves caution is whether we are averaging correctly. Spatial and ensemble averaging can produce very different results in a system that has non-stationary behavior, which is the case for Placozoa. Here, I compare the correlation statistics - correlation length and susceptibility - to determine if the two are well-matched and we can treat these averaging methods as equivalent.
+
+```{r compareAveraging, cache=T, dependson = c("meanProfiles", "correlationStats")}
+averageCompareDF = inner_join(perFrameAvgCorrStats, meanProfilesStats)
+(plot_vCL = ggplot(averageCompareDF, aes(vZero_mean, vZero)) + geom_point(color = "blue") + geom_abline(slope = 1, intercept = 0) + scale_x_continuous(TeX("$<\\phi(C_v(x))>$")) + scale_y_continuous(TeX("$\\phi(<C_v(x)>)")))
+plot_dCL =ggplot(averageCompareDF, aes(sZero_mean, sZero)) + geom_point(color = "green") + geom_abline(slope = 1, intercept = 0) + xlab(TeX("$<\\phi(C_D(x))>$")) + ylab(TeX("$\\phi(<C_D(x)>)"))
+plot_sCL = ggplot(averageCompareDF, aes(dZero_mean, dZero)) + geom_point(color = "red") + geom_abline(slope = 1, intercept = 0) + xlab(TeX("$<\\phi(C_S(x))>$")) + ylab(TeX("$\\phi(<C_S(x)>)"))
+plot_vChi = ggplot(averageCompareDF, aes(vSuscept_mean, vSuscept)) + geom_point(color = "blue") + geom_abline(slope = 1, intercept = 0) + xlab(TeX("$<\\chi(C_v(x))>$")) + ylab(TeX("$\\chi_v(<C_v(x)>)"))
+plot_dChi = ggplot(averageCompareDF, aes(dSuscept_mean, dSuscept)) + geom_point(color = "green") + geom_abline(slope = 1, intercept = 0) + xlab(TeX("$<\\chi(C_D(x))>$")) + ylab(TeX("$\\chi_D(<C_v(x)>)"))
+plot_sChi = ggplot(averageCompareDF, aes(sSuscept_mean, sSuscept)) + geom_point(color = "red") + geom_abline(slope = 1, intercept = 0) + xlab(TeX("$<\\chi(C_S(x))>$")) + ylab(TeX("$\\chi(<C_S(x)>)"))
+(averagingMethodsCompare = plot_grid(plot_vCL, plot_dCL, plot_sCL, plot_vChi, plot_dChi, plot_sChi, ncol = 3, labels = "AUTO", label_size = 28))
+save_plot(paste(projectFolder, "averagingMethodsCompare.pdf", sep = "/"), averagingMethodsCompare, base_width = 12, base_height = 8)
+
+summary(lm(vSuscept ~ vSuscept_mean, data = averageCompareDF))
+```
+
