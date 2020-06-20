@@ -1,0 +1,887 @@
+---
+title: "Scale-free analysis: simulations"
+author: "Mircea Davidescu"
+date: "December 28, 2016"
+output: html_document
+params:
+  simDir: "D:/Mircea/Projects/RESEARCH/InternalCoordination/PawelSimulations/SimDataPlacozoa_nonnorm_spring"
+  timeLag: 3
+---
+
+# SIMULATION ANALYSIS BEGINS HERE
+
+Below is the simulation analysis that is used to determine if our results are only present at the critical phase transition or if they are generic to the system.
+* SzaboSim: simulations based on the Szabo et al. 2006 model, which does not include explicit alignment.
+* SimData_nonnorm: like Szabo et al. 2006 model, but forces are not normalized by the total number of interacting individuals.
+
+
+```{r setup}
+projectFolder = "D:/Mircea/Projects/RESEARCH/InternalCoordination/"
+knitr::opts_knit$set(root.dir = projectFolder)
+hdf5Identifier = "longformOpticalFlow.hdf5"
+masterDir = "E:/Placozoa/HighMagTracked"
+
+
+# Packages made by others.
+require(tidyverse)
+require(forcats)
+require(rhdf5)
+require(cowplot)
+require(jpeg)
+require(grid)
+require(alphahull)
+require(modelr)
+require(polynom)
+require(stringr)
+require(pracma)
+require(sp)
+require(latex2exp)
+require(zoo)
+require(bigsplines)
+
+# Set up parallel processing environment.
+library(multidplyr)
+cl = create_cluster(7)
+set_default_cluster(cl)
+cl = cl %>% cluster_library("scalefree") %>% cluster_library("dplyr") %>% cluster_library("purrr") %>% cluster_library("tidyr") %>% cluster_library("stringr") %>%
+  cluster_library("readr") %>% cluster_library("collective") %>% cluster_library("bigsplines") %>% cluster_library("alphahull")
+
+# My own packages.
+require(bigh5)
+require(collective)
+require(scalefree)
+require(mover)
+
+# Make the plots prettier.
+cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
+theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.title=element_text(size = 18, hjust = 0.5), axis.text=element_text(size = 18), legend.title = element_text(size = 18, face = "bold"), legend.text = element_text(size = 12, face="plain"))
+
+
+# For doing fluid network simulations only
+simDir = 'D:/Mircea/Projects/RESEARCH/InternalCoordination/Data_Original/PawelSimulations/SimDataPlacozoa_nonnorm_spring'
+```
+
+The data were already normalized previously. For help, see simulFunctions.R on how this was done by Pawel.
+
+
+# Produce an example velocity field with fluctuations
+
+```{r particeDFs, cache = T}
+particleDFs = list.files(path = simDir, pattern="*sampledFrames.rds", full.names=T, recursive = T)
+metadata = data.frame(filename = particleDFs, stringsAsFactors = F) %>% mutate(processedFiles = str_replace(filename, "sampledFrames", "nestedFrames"))
+numericals = str_extract_all(basename(particleDFs), "[0-9.]+", simplify = T)[,1:3]
+numericals = matrix(as.numeric(unlist(numericals)), ncol = ncol(numericals))
+metadata = cbind(metadata, numericals)
+colnames(metadata) = c("filename", "processedFile", "Noise", "Size", "Replicate")
+metadata = arrange(metadata, Noise, Size)
+
+
+criticalityFiles = filter(metadata, Size == 16384 & Noise == 3.4)
+criticalityFrames = read_rds(criticalityFiles$filename[[1]])
+criticalityFrame = criticalityFrames %>% filter(Frame == unique(Frame)[190]) %>% select(-Frame) %>% calculateFluctuationField() %>% mutate(angle = atan2(x = fluctX, y = fluctY), speed = sqrt(fluctX^2 + fluctY^2))
+(criticalNoisePlot = ggplot(criticalityFrame, aes(X, Y, color = angle, alpha = speed)) + geom_point() + coord_fixed() + scale_color_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha = F) + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank()))
+
+
+# Create a smoothed version of this plot
+
+(criticalNoisePlot = ggplot(criticalityFrame, aes(X, Y, color = angle, alpha = speed)) + geom_point() + coord_fixed() + scale_color_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha = F) + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank()))
+
+
+write_rds(x = criticalityFrame, path = paste(projectFolder,"Data_Processed/simulation_sample_frame_strength.rds", sep = "/"))
+save_plot(paste(paste(projectFolder,"Figures/", sep = "/"), "3A_critical_strength.pdf", sep = "/"), criticalNoisePlot)
+save_plot(paste(paste(projectFolder,"Figures/", sep = "/"), "3A_critical_strength.jpg", sep = "/"), criticalNoisePlot)
+
+```
+
+## Get the fluctuation field and alpha hull.
+
+```{r processDataFiles, cache=T, dependson = "particleDFs"}
+mapProcessData = function(dataFile, processedFile) {
+  vFieldData = read_rds(dataFile) %>% mutate(X = jitter(X,1), Y = jitter(Y, 1)) %>% group_by(Frame) %>% nest(.key = "velocityField")
+  ahullData = vFieldData %>% mutate(noBoundary = map(velocityField, function(x) {removeBoundary(x, 0.1, ballSize = 30)})) %>%
+    mutate(fluctuationaField = map(noBoundary, calculateFluctuationField))
+  write_rds(ahullData, processedFile)
+  return(TRUE)
+}
+
+cluster_copy(cl, mapProcessData)
+needsProcessing = metadata %>% mutate(doneAlready = file.exists(processedFile)) %>% filter(!doneAlready)
+
+if (nrow(needsProcessing) != 0) {
+  processData = needsProcessing %>% partition() %>% mutate(makeNewFile = map2(filename, processedFile, mapProcessData)) %>% collect()  
+}
+```
+
+
+## Measure order parameters for each frame.
+
+```{r orderData, cache=T, dependson="processData"}
+orderData = read_rds(paste(simDir, "orderData.rds", sep = "/"))
+
+orderDataSummary = group_by(orderData, Noise, Size) %>% summarise(meanOrder = mean(Order), sdOrder = sd(Order), count = n())
+
+(orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + 
+    geom_errorbar(aes(ymax = meanOrder + sdOrder/sqrt(count), ymin = meanOrder - sdOrder/sqrt(count)), width = 0.05) + 
+    scale_y_continuous("Order") + scale_x_continuous(expression(mu)) + 
+  scale_color_gradient(TeX("\\sqrt{N}")) + annotate("rect", ymax = Inf, ymin = -Inf, xmin = 3.4, xmax = 3.7, fill = "red", alpha = 0.5))
+save_plot(paste(projectFolder,"Figures", "/3B_NoiseOrder_strength.jpg", sep = ""), orderNoisePlot)
+write_rds(path = paste(projectFolder, "Data_Processed", "3B_SpringStrengthOrder.rds", sep = "/"), x = orderDataSummary)
+
+
+```
+
+
+## Fluctuation fraction
+
+```{r fluctuationEnergy, cache=T, dependson = "processData"}
+mapEnergyFraction = function(processedFile) {
+  unnestedVF = read_rds(processedFile) %>% select(Frame, noBoundary, fluctuationaField) %>%
+    unnest()
+  unnestedVF = unnestedVF[,-c(2,3)]
+  unnestedVF = unnestedVF %>% mutate(vEnergy = vX^2 + vY^2, uEnergy = fluctX^2 + fluctY^2)
+  
+  energyMeasures = unnestedVF %>% group_by(Frame) %>% summarise(meanVE = mean(vEnergy), meanUE = mean(uEnergy)) %>%
+  mutate(energyRatio = meanUE / meanVE) %>% ungroup()
+  write_rds(x = energyMeasures, path = paste(dirname(processedFile), "/energyMeasures.rds"))
+  return(energyMeasures)
+}
+
+
+cl = cluster_copy(cl, mapEnergyFraction)
+
+if (file.exists(paste(simDir, "energyData.rds", sep = "/"))){
+  oldEnergyData = read_rds(paste(simDir, "energyData.rds", sep = "/"))
+  needsEnergy = metadata %>% anti_join(oldEnergyData)
+} else {
+  needsEnergy = metadata
+}
+
+if (nrow(needsEnergy) != 0) {
+  energyMeasures = needsEnergy %>% partition() %>% mutate(energyDF = map(processedFile, mapEnergyFraction)) %>% collect() %>% 
+    select(Noise, Size, Replicate, energyDF) %>% unnest()
+}
+
+
+energyMeasures = oldEnergyData %>% arrange(Noise, Size)
+write_rds(energyMeasures, paste(simDir, "energyData.rds", sep = "/"))
+write_rds(energyMeasures, paste(projectFolder, "Data_Processed/energyData_strength.rds", sep = "/"))
+```
+
+
+
+```{r fluctuationEnergyAnimal}
+energyOrder = inner_join(read_rds(paste(simDir, "orderData.rds", sep = "/")), read_rds(paste(simDir, "energyData.rds", sep = "/")))
+
+# What is the relationship between intrinsic order and the "noise energy" that we measure in our live animal?
+energyNoiseRelated = energyOrder %>% group_by(Noise, Size) %>% summarise(meanEnergy = mean(energyRatio))
+(noiseenergyRelationPlot = ggplot(energyNoiseRelated, aes(Noise, meanEnergy, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + scale_x_continuous(expression(eta)) + scale_y_continuous(expression(paste(eta,"*",sep=""))) + scale_color_continuous(TeX("\\sqrt{N}")) + guides(color = F))
+(noiseEnergyCriticalityPlot = filter(energyNoiseRelated, Noise >= 3.3 & Noise <=3.7) %>% ggplot(aes(Noise, meanEnergy, color = Size, group = Size)) + geom_point() + geom_line() + scale_x_continuous(expression(eta), breaks = c(0.33, 0.35, 0.37)) + scale_y_continuous(expression(paste(eta,"*",sep=""))) + scale_color_continuous(TeX("\\sqrt{N}")))
+
+criticalRange = energyOrder %>% filter(Noise >= 3.0 & Noise <= 4.0) %>% filter(abs(rotation) <= 0.3)
+write_rds(x = criticalRange, path = paste(projectFolder, "3C_NoiseOrderRelation_strength.rds", sep = ""))
+
+(criticalSlopesPlot = ggplot(criticalRange, aes(energyRatio, polarization, group = Size)) + geom_point(aes(color = Noise), alpha = 0.2) + stat_smooth(aes(linetype = as.factor(Size)), method = "lm", se = F, color = "red") + scale_color_gradient(expression(eta), breaks = c(0.3, 0.35, 0.4)) + scale_x_continuous(expression(paste(eta,"*",sep="")), breaks = c(0,0.5,1), limits = c(0,1)) + scale_y_continuous("Order", breaks = c(0,0.5,1), limits = c(0,1)) + scale_linetype_discrete(TeX("\\sqrt{N}")))
+save_plot(paste(simDir, "criticalSlopes_polarization_norotation.jpg", sep = "/"), criticalSlopesPlot, base_height = 5, base_width = 6)
+
+
+energyModel = function(df) {
+  lm(polarization ~ energyRatio, data = df)
+}
+
+nestedRanges = criticalRange %>% select(Size, Replicate, energyRatio, polarization) %>% group_by(Size, Replicate) %>% nest()
+
+modelSlopes = nestedRanges %>% mutate(linearFit = map(data, energyModel)) %>%
+  mutate(slope = map(linearFit, function(x) {x$coefficients[[2]]})) %>% select(Size, Replicate, slope) %>%
+  mutate(Diam = sqrt(Size)) %>% mutate(logDiam = log(Diam)) %>% unnest() 
+
+linearFit = glm(slope ~ Diam, data = modelSlopes)
+expFit = glm(slope ~ logDiam, data = modelSlopes)
+AICModels = AIC(expFit, linearFit)
+pCorrect = exp((AICModels[[1,2]] - AICModels[[2,2]])/2)
+print(paste("Probability that linear model is right:", pCorrect))
+
+modelSlopes = modelSlopes %>% add_predictions(linearFit, "linear") %>% add_predictions(expFit, "exponential")
+write_rds(modelSlopes, paste(projectFolder, "3D_NoiseSlope_strength.rds", sep = ""))
+(diameterSlopePlot = ggplot(modelSlopes, aes(Diam, slope)) + geom_point(alpha = 0.5) + xlab(TeX("Size (\\sqrt{N})")) +
+    ylab("S'(r)") + geom_line(aes(Diam, linear), size = 1, alpha = 0.5, color = "red") + 
+    geom_line(aes(Diam, exponential), size = 1))
+save_plot(paste(simDir, "slopeNoiseSize_norotation.jpg", sep = "/"), diameterSlopePlot, base_width = 6, base_height = 5)
+```
+
+
+## Correlations in simulation data
+
+```{r correlationProfiles, cache=T, dependson="processData"}
+mapCorrelationProfiles = function(dataFile) {
+  velocityCorrelations = read_rds(dataFile) %>% sample_n(25)
+  velocityCorrelations = velocityCorrelations %>% mutate(correlationFunction = map2(noBoundary, fluctuationaField, possibly(function(x,y) {calcCorrelationFunction(x,y, 3600)}, NA)))
+  boundCorrelations = velocityCorrelations %>% select(Frame, correlationFunction) %>% filter(!is.na(correlationFunction)) %>% unnest()
+  return(boundCorrelations)
+}
+
+if (!file.exists(paste(simDir, "correlationProfiles.rds", sep = "/"))) {
+  correlationProfiles = metadata %>% mutate(corrProfiles = map(processedFile, mapCorrelationProfiles))
+  corrlationProfiles = select(correlationProfiles, processedFile, Noise, Size, Replicate, corrProfiles) %>% mutate(processedFile = basename(processedFile)) %>%
+  unnest() %>% unnest()
+  write_rds(correlationProfiles, paste(simDir, "correlationProfiles.rds", sep = "/"))  
+} else {
+  correlationProfiles = read_rds(paste(simDir, "correlationProfiles.rds", sep = "/"))
+}
+write_rds(correlationProfiles, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/correlationProfiles_sim_strength.rds")
+```
+
+
+## Calculate susceptibility and correlation length
+
+```{r correlationStats, cache=T, dependson="correlationProfiles"}
+mapCorrStats = function(correlationFunctions) {
+  # Get the profiles before they become negative.
+  velocityProfile = correlationFunctions %>% select(domain, vCorr) 
+  directionProfile = correlationFunctions %>% select(domain, dCorr) 
+  speedProfile = correlationFunctions %>% select(domain, sCorr) 
+  
+  # Get the correltion lengths for each type of correlation.
+  vZero = getFirstZeroCrossing(correlationFunctions$vCorr, distMapping = correlationFunctions$domain)
+  dZero = getFirstZeroCrossing(correlationFunctions$dCorr, distMapping = correlationFunctions$domain)
+  sZero = getFirstZeroCrossing(correlationFunctions$sCorr, distMapping = correlationFunctions$domain)
+  
+  # Susceptibility integrates correlation up to the correlation length, according to Attanasi et al. 2014
+  if (is.na(vZero)) {positiveV = NA} else {positiveV = filter(velocityProfile, domain <= vZero)}
+  if (is.na(dZero)) {positiveD = NA} else {positiveD = filter(directionProfile, domain <= dZero)}
+  if (is.na(sZero)) {positiveS = NA} else {positiveS = filter(speedProfile, domain <= sZero)}
+  
+  # Get the integral of teh positive correlation profile.
+  if (length(positiveV) == 1) {vSuscept = NA} else {vSuscept = calculateSusceptibility(distance = positiveV$domain, correlation = positiveV$vCorr)}
+  if (length(positiveD) == 1) {dSuscept = NA} else {dSuscept = calculateSusceptibility(distance = positiveD$domain, correlation = positiveD$dCorr)}
+  if (length(positiveS) == 1) {sSuscept = NA} else {sSuscept = calculateSusceptibility(distance = positiveS$domain, correlation = positiveS$sCorr)}
+
+  statsDF = data.frame(vZero, dZero, sZero, vSuscept, dSuscept, sSuscept)
+  return(statsDF)
+}
+
+correlationProfiles = read_rds(paste(simDir, "correlationProfiles.rds", sep = "/"))
+nestedProfiles = correlationProfiles %>% select(-processedFile) %>% group_by(Noise, Size, Replicate, Frame) %>% nest(.key = "correlationProfile")
+correlationStats = nestedProfiles %>% partition(Noise) %>% cluster_library("pracma") %>% cluster_copy(mapCorrStats) %>% mutate(corrStats = map(correlationProfile, mapCorrStats)) %>% collect() %>% select(Noise, Size, Replicate, Frame, corrStats) %>% unnest() %>% ungroup() %>% arrange(Noise)
+
+perFrameAvgCorrStats = group_by(correlationStats, Noise, Size) %>%
+  summarise_each(funs(mean, sd), c(vZero:sSuscept)) %>% mutate(nObs = 100)
+write_rds(perFrameAvgCorrStats, paste(projectFolder,"/correlationStats_sim_strength.rds",sep = ""))
+
+criticalData = filter(perFrameAvgCorrStats, Noise == 3.7)
+(vZeroPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vZero_mean, color = Noise, group = Noise)) + geom_point(size=2) + geom_line() +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[V]," (a.u.)",sep=""))) + scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3) + geom_point(data = criticalData, color = "black") + geom_line(data = criticalData, color = "black"))
+write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3E_3F_corrStats_noise.rds")
+
+(sZeroPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vZero_mean, color = Noise, group = Noise)) + geom_point(size=2) + 
+    geom_errorbar(aes(ymax=sZero_mean + sZero_sd / sqrt(nObs), ymin=sZero_mean - sZero_sd / sqrt(nObs))) +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[s]," (a.u.)",sep=""))) + scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3))
+
+(vSusceptPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vSuscept_mean, color = Noise, group = Noise)) + geom_point(size=2) + geom_line() +
+    geom_point(data = criticalData, color = "black") + geom_line(data = criticalData, color = "black") +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(chi[V]," (a.u.)",sep=""))) + scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3))
+write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3E_3F_corrStats_strength.rds")
+```
+
+## Full simulation figure
+
+```{r fullSimfigure, cache=T}
+simPlot = plot_grid(sampleFieldPlot + theme(axis.title = element_text(size = 28)), 
+                    orderNoisePlot + theme(axis.title = element_text(size = 28)), 
+                    criticalSlopesPlot + theme(legend.position = c(0.1, 0.5), axis.title = element_text(size = 28)), 
+                    diameterSlopePlot + theme(axis.title = element_text(size = 28)), 
+                    vZeroPlot + guides(color = F) + theme(axis.title = element_text(size = 28)), 
+                    vSusceptPlot + theme(axis.title = element_text(size = 28)), 
+                    ncol = 2, labels = "AUTO", label_size = 28)
+
+simPlot = plot_grid(criticalSlopesPlot + theme(legend.position = c(0.1, 0.5), axis.title = element_text(size = 28)), 
+                    diameterSlopePlot + theme(axis.title = element_text(size = 28)), 
+                    vZeroPlot + guides(color = F) + theme(axis.title = element_text(size = 28)), 
+                    vSusceptPlot + theme(axis.title = element_text(size = 28)), 
+                    ncol = 2, labels = "AUTO", label_size = 28)
+
+
+save_plot(plot = simPlot, paste(simDir, "simPlot.pdf", sep = "/"), base_width = 14, base_height = 12)
+```
+
+## Alternative susceptibility calculation
+
+```{r susceptBinderFromOrder, cache=T, dependson="orderMeasures"}
+# Perform calculation for all order data.
+orderMeasures = mutate(orderData, orderToCalc = polarization) %>% filter(abs(rotation) <= 0.4)
+orderSuscept = select(orderMeasures, -processedFile) %>% mutate(orderSquared = orderToCalc^2) %>% group_by(Size, Noise) %>% summarise(meanOrder = mean(orderToCalc), meanSquaredOrder = mean(orderSquared)) %>% mutate(susceptibility = Size * (meanSquaredOrder - meanOrder^2))
+
+write_rds(x = orderSuscept, path = paste(projectFolder,"simOrderSusceptibility.rds", sep = "/"))
+
+(susceptSizePlot = filter(orderSuscept,Noise!=0.34) %>% ggplot(aes(Size, susceptibility, color = as.factor(2*(Noise >= 0.36) + (Noise == 0.35)), group = Noise)) + geom_point() + geom_line() + scale_color_manual(values = c("red", "black", "blue"), labels = c(TeX("\\eta > \\eta_C")), TeX("\\eta = \\eta_C"), expression("\\eta < \\eta_C")) + xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(eta[o])))
+
+(susceptOrderPlot = ggplot(orderSuscept, aes(Noise, susceptibility, group = sqrt(Size), color = sqrt(Size))) + geom_point() + geom_line() + scale_y_continuous(expression(chi[o])) + scale_x_continuous(expression(eta)) + scale_color_gradient(TeX("\\sqrt{N}")) +
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 3.4, xmax = 3.7, fill = "red", alpha = 0.5))
+save_plot(filename = paste(projectFolder, "Figures", "/susceptFromPolarization_norotation_strength.jpg", sep = ""), susceptOrderPlot)
+write_csv(orderSuscept, paste(projectFolder, "Data_Processed", "orderSusceptibility.csv", sep = "/"))
+
+# Calculate the Binder cumulant based on the unified order measure.
+orderBinder = orderMeasures %>% mutate(orderSquared = orderToCalc^2, orderQuart = orderToCalc^4) %>% group_by(Size, Noise) %>%
+  summarise(meanQuart = mean(orderQuart), meanSquared = mean(orderSquared)) %>% mutate(binderCumulant = 1 - meanQuart / (3 * meanSquared^2))
+
+(allBinder = ggplot(orderBinder, aes(Noise, binderCumulant, color = sqrt(Size), group = sqrt(Size))) + geom_point() + geom_line() + scale_y_continuous("U") + scale_x_continuous(expression(eta), breaks = c(0.2, 0.35, 0.5, 0.6)) + scale_color_gradient(TeX("\\sqrt{N}")))
+save_plot(paste(simDir, "binderCumulantPolarization_norotation.jpg", sep = "/"), allBinder, base_height = 5, base_width = 6)
+
+(binderZoomed = ggplot(orderBinder, aes(Noise, binderCumulant, color = sqrt(Size), group = sqrt(Size))) + geom_point() + geom_line() + scale_y_continuous("U") + scale_x_continuous(expression(eta), limits = c(0.3, 0.4), breaks = c(0.3, 0.33, 0.35, 0.37, 0.4)) + scale_color_gradient(TeX("\\sqrt{N}")) + geom_vline(xintercept = 0.3425))
+save_plot(paste(simDir, "binderCumulantPolZoomed_norotation.jpg", sep = "/"), binderZoomed, base_height = 5, base_width = 6)
+```
+
+
+```{r rescaledProfiles, cache = T, dependson="simulationScaleFree"}
+corrProfilesDF = read_rds(paste(simDir, "correlationProfiles.rds", sep = "/"))
+meanProfilesSim = corrProfilesDF %>% group_by(numParticles, noise, domain, replicate) %>% 
+  summarise(meanVCorr = mean(vCorr)) %>% mutate(groupID = paste(numParticles, noise, replicate, sep="_")) %>%
+  group_by(groupID)
+
+vZeroSim = meanProfilesSim %>% group_by(groupID) %>% mutate(vZero = zerosFromDF(meanVCorr, domain), susceptibility = calculateSusceptibility(domain, meanVCorr)) 
+
+rescaledProfiles = vZeroSim %>% mutate(rescaledDomain = domain/vZero) %>%
+  filter(rescaledDomain < 1.5)
+
+(rescaledSimPlot = ggplot(rescaledProfiles, aes(rescaledDomain, meanVCorr, group=groupID, color=sqrt(numParticles))) +
+    geom_line(size=1) + facet_wrap(~ noise, ncol=3) + geom_hline(yintercept = 0, linetype=2) + 
+    scale_color_gradient(name=expression(paste("Size (",N^frac(1,2),")"))) + 
+    scale_x_continuous(name = expression(paste("x/",phi,sep="")), breaks=c(0,1)) + 
+    scale_y_continuous(name = "C(x)", breaks = c(0,1)) + theme(legend.position = "right"))
+
+
+(nonscaledSimPlot = ggplot(rescaledProfiles, aes(domain, meanVCorr, group=groupID, color=sqrt(numParticles))) +
+    geom_line(size=1) + facet_wrap(~ noise, ncol=3) + geom_hline(yintercept = 0, linetype=2) + 
+    scale_color_gradient(name=expression(paste("Size (",N^frac(1,2),")"))) + 
+    scale_x_continuous(name = "x", breaks = c(0,40)) + 
+    scale_y_continuous(name = "C(x)", breaks = c(0,1)) + theme(legend.position = "right"))
+
+save_plot(filename = paste(simDir,"rescaledSimPlot_SI.pdf",sep="/"), rescaledSimPlot, base_height = 9, base_width = 18)
+
+save_plot(filename = paste(simDir, "simCorrProfiles_SI.pdf", sep="/"), nonscaledSimPlot, base_height = 10, base_width = 18)
+
+# Plot the correlation profiles for a fixed size, varying the noise level within one plot.
+sizes = c(256, 1024, 8192)
+oneSize = filter(rescaledProfiles, numParticles %in% sizes)
+(noiseProfilesPlot = ggplot(oneSize, aes(domain, meanVCorr, color = noise, group = groupID)) + geom_path() + scale_colour_gradientn(colors = c("blue", "yellow", "red")) + facet_wrap(~ numParticles, scales = "free") + theme(legend.position = "right"))
+save_plot("figures/noiseEffectProfiles.pdf", noiseProfilesPlot, base_height = 8, base_width = 27)
+
+susceptibilityDF = rescaledProfiles %>% ungroup() %>% select(numParticles, noise, replicate, susceptibility) %>% unique() %>%
+  group_by(numParticles, noise) %>% summarise(mSusc = mean(susceptibility), sdSusc = sd(susceptibility), samples = n()) %>% mutate(seSusc = sdSusc/sqrt(samples))
+
+
+(sizeSusceptibilityNoise = ggplot(susceptibilityDF, aes(sqrt(numParticles), mSusc, color = noise, group = noise)) + geom_point() + geom_errorbar(aes(ymax = mSusc + seSusc, ymin = mSusc - seSusc)) + theme(legend.position = "right") + scale_y_continuous(name = expression(chi), breaks = c(1,5)) +
+    xlab(expression(paste(" Size (",N^frac(1,2),")"))) + facet_wrap(~ noise))
+save_plot(paste(simDir,"/simulationSusceptibility.pdf", sep = ""), sizeSusceptibilityNoise, base_width = 15, base_height = 9)
+```
+
+
+# Select noise that best fits animal data in terms of fluctuation modulus
+
+## Load simulation and animal full and fluctuation vectors.
+
+
+```{r withFluctuations, cache=T, dependson=-1}
+simDataFile = paste(simDir, "simVectors.rds", sep="/")
+if (!file.exists(simDataFile)) {
+  cl = makeCluster(7)
+  registerDoParallel(cl)
+  
+  allFields = foreach(thisDF = particleDFs, .packages = c("dplyr", "readr", "stringr", "ggplot2", "tidyr", "purrr", "bigsplines", "alphahull")) %dopar% {
+    myNums = str_extract_all(thisDF,"[0-9.]+")
+    noise = as.numeric(myNums[[1]][1])
+    particles = as.numeric(myNums[[1]][[2]])
+    replicate = as.numeric(myNums[[1]][[3]])
+    corrFile = paste("correlationProfiles", noise, particles, replicate, ".csv",sep="_")
+    print(corrFile)
+    corrFile = paste(simDir,corrFile,sep="/")
+  
+    # Do processing only if it was not already done before, because it's expensive.
+    print("Reading data...")
+    simData = read_rds(thisDF)
+    subsetFrames = sample(unique(simData$Frame), 20)
+    simData = filter(simData, Frame %in% subsetFrames)
+  
+    # Distinguish boundary vectors and filter them out as they are anomalous
+    print("Identify bulk and boundary...")
+    bulkIdentified = simData %>% group_by(Frame) %>%
+      mutate(bulk = identifyBoundary(X, Y, marginPercent = 0.1, tryAlpha = 100))
+  
+
+    onlyBulk = bulkIdentified %>% filter(bulk) %>% select(-bulk)
+    nestedVFs = onlyBulk %>% group_by(Frame) %>% nest(.key = velocityField)
+    print("Calculat fluctuations...")
+    nestedVFs = nestedVFs %>% mutate(fluctField = map(velocityField, calculateFluctuationField))
+  
+    # Calculate correlations for the fluctuation fields.
+    myFrame = nestedVFs  %>% select(Frame, velocityField, fluctField) %>% unnest() %>%
+      mutate(noise = noise, replicate = replicate, particles = particles)
+  }
+  
+  stopCluster(cl)
+  vectorsDF = bind_rows(allFields) %>% mutate(speed = sqrt(vX^2 + vY^2), fluctspeed = sqrt(fluctX^2 + fluctY^2))
+  write_rds(vectorsDF, simDataFile)
+}
+vectorsDF = read_rds(simDataFile)
+
+fluctVRatio = vectorsDF %>% group_by(noise, particles) %>% summarise(meanSpeed = mean(speed), meanFluct = mean(fluctspeed)) %>%
+  mutate(fluctRatio = meanFluct / meanSpeed)
+rm(list = "vectorsDF")
+gc()
+```
+
+
+```{r calculateAnimalVectors}
+# Load animal data
+if (!file.exists(paste(projectFolder, "animalVectors.rds", sep="/"))) {
+  framesDF = read_csv("sampledFrames.csv") %>% unite(frameID, Frame, folder, sep = "@")
+  cl = makeCluster(7)
+  registerDoParallel(cl)
+  
+  
+  bulkFields  = foreach(thisDF = framesDF$frameID, .packages = c("dplyr", "readr", "stringr", "rhdf5", "tidyr", "purrr", "bigh5", "alphahull")) %dopar% {
+    dataProps = str_split(thisDF, "@")
+    velocityField = readDataAtFrame(paste(dataProps[[1]][[2]], "longformOpticalFlow.hdf5", sep="/"), datasetName = "longform", indicesName = "longformFrameIndices", frameNumbers = as.numeric(dataProps[[1]][[1]])) %>% standardizePlacozoaVectors()
+        
+    onlyBulk = velocityField %>% group_by(Frame) %>% mutate(bulk = identifyBoundary(X, Y, marginPercent = 0.1, tryAlpha = 5)) %>%
+      filter(bulk) %>% select(-bulk) %>% mutate(ID = thisDF)
+    return(onlyBulk)
+  }
+  stopCluster(cl)
+  
+  vectorfields = bind_rows(bulkFields)
+  # Get fluctuations
+  withFluctuations = vectorfields %>% group_by(Frame, ID) %>% nest(.key = "velocityField") %>% mutate(fluctField = map(velocityField, calculateFluctuationField))
+  write_rds(withFluctuations, paste(projectFolder, "animalVectors.rds", sep="/"))
+}
+```
+
+## Compare the animal data with the simulation data in terms of noise magnitudes.
+
+
+```{r matchedDomain, cache=T, dependson="withFluctuations"}
+# Get fluctuation and full velocity modulus
+withFluctuations = read_rds(paste(projectFolder, "animalVectors.rds", sep="/")) %>% sample_n(3600)
+completeFieldData = unnest(withFluctuations) %>% mutate(collectiveX = vX - fluctX, collectiveY = vY - fluctY) %>% mutate(vModulus = sqrt(vX^2 + vY^2), fModulus = sqrt(fluctX^2 + fluctY^2), wModulus = sqrt(collectiveX^2 + collectiveY^2)) %>% select(-X, -Y, -relX, -relY)
+rm(list = "withFluctuations")
+gc()
+
+# Remove an frames in which cells have anomalously large speeds, as these are not real.
+anomalousIndices = which(completeFieldData$vModulus > 20)
+badIDs = unique(completeFieldData$ID[anomalousIndices])
+completeFieldData = filter(completeFieldData, !(ID %in% badIDs))
+
+# Get the moduli and noise ratio for each animal.
+meanModuli = completeFieldData %>% select(-Frame) %>% group_by(ID) %>% nest() %>% separate("ID", c("Frame", "folder"), sep="@") %>% unnest() %>% group_by(folder) %>% summarise(meanVeloc = mean(vModulus), meanFluct = mean(fModulus), meanCollect = mean(wModulus), sdCollect = sd(vModulus), sdFluct = sd(fModulus), count = n()) %>% mutate(noiseRatio = meanFluct / meanVeloc) %>% mutate(omegaOrder = 1 - noiseRatio)
+
+# Get the mean sizes for each animal.
+animals = read_rds("allShapeData.rds") %>% mutate(folder = paste("G:/ALL DATA/HighMagTracked/",folder,sep="")) %>% 
+  select(folder, Frame, Area, EquivalentDiameter) %>% group_by(folder) %>% summarise(meanSize = mean(EquivalentDiameter), sdSize = sd(EquivalentDiameter))
+
+sizeNoiseRatio = inner_join(animals, meanModuli)
+(noiseRatioAnimal = ggplot(sizeNoiseRatio, aes(meanSize, omegaOrder)) + geom_point() + xlab(expression(paste("Animal Diameter (",mu,"m)", sep=""))) + ylab(expression(omega)) + stat_smooth(se = F, span = 1))
+save_plot("noiseRatioAnimal.pdf", noiseRatioAnimal)
+
+
+
+noiseRatioBinned = sizeNoiseRatio %>% mutate(sizeBin = cut(meanSize, 10)) %>% group_by(sizeBin) %>%
+  summarise(size = mean(meanSize), meanOmega = mean(omegaOrder), sdSize = sd(meanSize), sdOmega = sd(omegaOrder), count = n())
+
+
+meanSizesLM = lm(meanOmega ~ size, data = noiseRatioBinned)
+withModel = noiseRatioBinned %>% add_predictions(meanSizesLM)
+noiseRange = range(withModel$meanOmega)
+
+
+(noiseRatioBinnedPlot = ggplot(noiseRatioBinned, aes(size, meanOmega)) + geom_point() + geom_errorbar(aes(ymax = meanOmega + sdOmega/sqrt(count), ymin = meanOmega - sdOmega/sqrt(count))) + geom_errorbarh(aes(xmin = size - sdSize/sqrt(count), xmax = size + sdSize/sqrt(count))) + ylab(expression(omega)) + stat_smooth(se=F, span = 1) + annotate("rect", fill = "red", alpha = 0.4, xmin = -Inf, xmax = Inf, ymin = noiseRange[1], ymax = noiseRange[2]))
+
+
+# Get the noise-size fluctuation ratio for simulations
+(noiseRatioSim = ggplot(fluctVRatio, aes(noise, 1 - fluctRatio, color = sqrt(particles), group = particles)) + geom_point() + geom_path() +
+  xlab("Noise") + ylab(expression(omega)) + theme(legend.position = "right") + scale_color_gradient(name = "Size") + annotate("rect", fill = "red", alpha = 0.4, xmin = -Inf, xmax = Inf, ymin = noiseRange[[1]], ymax = noiseRange[[2]]) + annotate("rect", fill = "yellow", alpha = 0.4, xmin = 0.3, xmax = 0.35, ymin = -Inf, ymax = Inf))
+save_plot(filename = "noiseRatioSim.pdf", noiseRatioSim)
+
+x = fluctVRatio %>% filter(noise == 0.35) %>% ggplot(aes(sqrt(particles), fluctRatio)) + geom_point()
+
+(noiseMatching = plot_grid(noiseRatioSim, noiseRatioAnimal, x, ncol = 3))
+save_plot("noiseMatching.pdf", noiseMatching, base_width = 27, base_height = 8)
+
+matchedDomain = rescaledProfiles %>% filter(noise == 0.35) 
+
+# Plot good rescaled profile
+(rescaledMatched = ggplot(matchedDomain, aes(rescaledDomain, meanVCorr, group=groupID, color=sqrt(numParticles))) +
+    geom_line(size=1) + geom_hline(yintercept = 0, linetype=2) + 
+    scale_color_gradient(name=expression(paste("Size (",N^frac(1,2),")")), high = "red", low = "black") + 
+    scale_x_continuous(name = expression(paste("x/",phi,sep="")), breaks=c(0,1)) + 
+    scale_y_continuous(name = "C(x)", breaks = c(0,1)) + theme(legend.position = "right") +
+    theme(legend.position = c(0.8, 0.8)))
+save_plot("rescaledProfilesSim.pdf", rescaledMatched, base_width = 15, base_height = 9)
+```
+
+
+# Get the slope of the rescaled profile at different sizes.
+
+```{r simulationSlope, cache=T, dependson="rescaledDataSim"}
+closestToZeroSim = rescaledProfiles %>% mutate(distFromZero = abs(rescaledDomain - 1)) %>% group_by(groupID) %>% arrange(distFromZero) %>% slice(1:5) %>%
+  select(groupID, numParticles, noise, rescaledDomain, meanVCorr)
+
+nestedDF = closestToZeroSim %>% group_by(groupID) %>% nest() 
+
+
+slopes = rep(0,dim(nestedDF)[1])
+for (i in 1:length(slopes)) {
+  temp = nestedDF$data[[i]]
+  slopes[i] = abs(correlationSlope(unlist(temp[,3]), unlist(temp[,4])))
+}
+
+nestedDF$slopes = slopes
+
+uniqueCombos = rescaledProfiles %>% select(groupID, numParticles, noise, replicate)
+uniqueCombos = unique(uniqueCombos)
+
+nestedDF = inner_join(nestedDF, uniqueCombos)
+
+meanSlopes = nestedDF %>% group_by(numParticles, noise) %>% summarise(meanSlope = mean(slopes), sdSlope = sd(slopes), count = n())
+matchedNoise = meanSlopes %>% filter(noise == 0.3)
+
+(slopeAreaRelationSim = meanSlopes %>% ggplot(aes(sqrt(numParticles), meanSlope, color = noise)) + geom_point() + 
+    geom_errorbar(aes(ymax = meanSlope + sdSlope/sqrt(count), ymin = meanSlope - sdSlope/sqrt(count))) + 
+    geom_point(data = matchedNoise, color = "red", size = 4) + stat_smooth(data = matchedNoise, color = "red", se = F, span = 5) +
+    scale_x_continuous(name = expression(paste("Size (",N^frac(1,2),")",sep=""))) + ylab(expression(paste("|C",italic("'"),"(", phi,")|", sep=""))))
+```
+
+
+# Simulation susceptibility
+
+
+# Susceptibility as a function of size and noise
+
+```{r susceptSizeNoise, cache=T, dependson="corrProfilesDF"}
+corrProfilesDF = read_rds(simCorrfile)
+
+averageProfiles = group_by(corrProfilesDF, noise, numParticles, domain) %>% summarise(meanVCorr = mean(vCorr))
+
+susceptCalc = function(df) calculateSusceptibility(df$domain, df$vCorr)
+
+cumulativeCorr = corrProfilesDF %>% group_by(noise, numParticles, replicate, Frame) %>% nest(.key = "corrProfile") %>%
+  mutate(susceptibility = map(corrProfile, susceptCalc)) %>% select(noise, numParticles, susceptibility) %>% unnest()
+
+meanSusceptibility = cumulativeCorr %>% group_by(noise, numParticles) %>% summarise(meanChi = mean(susceptibility), sdChi = sd(susceptibility), count = n()) %>% mutate(size = sqrt(numParticles))
+
+
+noiseLevels = unique(meanSusceptibility$noise)
+noiseLevels = c(0.05, 0.3, 0.5)
+
+fitsList = list()
+aicTable = data.frame(Noise = noiseLevels, aicFit = 0, aicLinear = 0, pCorrect = as.numeric(NA))
+
+for (thisNoise in noiseLevels) {
+  print(thisNoise)
+  matchedSusceptibility = filter(meanSusceptibility, noise == thisNoise)
+  
+  # Param-finding test code.
+  testData = data.frame(size = seq(from = min(matchedSusceptibility$size), to = max(matchedSusceptibility$size), by = 1)) %>%
+    mutate(modelFit = 0.25*size^0.5 - 0)
+  ggplot(testData) + geom_point(aes(size, modelFit), color = "red") + geom_point(data = matchedSusceptibility, aes(size, meanChi)) + ylim(0, 5) + xlim(0,80)
+  x = nls.control(maxiter = 500, warnOnly = T)
+  
+  matchedModel = nls(meanChi ~ alpha * size^(beta) + gamma, data = matchedSusceptibility, start = list(alpha = 0.25, beta = 0.5, gamma = 0),  control = x)
+  
+  linearFit = lm(meanChi ~ size, data = matchedSusceptibility)
+  
+  modelPredictions = data.frame(size = seq(from = min(matchedSusceptibility$size), to = max(matchedSusceptibility$size), by = 1)) %>% add_predictions(matchedModel) %>% add_predictions(linearFit, var = "linear") %>% mutate(noise = thisNoise)
+  ggplot(modelPredictions) + geom_point(aes(size,pred), color = "red") + geom_point(aes(size, linear), color = "blue") + geom_point(data = matchedSusceptibility, aes(size, meanChi))
+  fitsList[[length(fitsList) + 1]] = modelPredictions
+  
+  # AIC comparison of models.
+  parCount = c(3,2)
+  AICModels = AIC(matchedModel, linearFit) %>% mutate(AICc = AIC + 2*parCount*(parCount + 1)/(nrow(matchedSusceptibility) - parCount - 1))
+  aicTable$aicFit[aicTable$Noise == thisNoise] = AICModels[1,'AICc']
+  aicTable$aicLinear[aicTable$Noise == thisNoise] = AICModels[2,'AICc']
+  aicTable$pCorrect[aicTable$Noise == thisNoise] = exp((AICModels[2,'AICc'] - AICModels[1,'AICc'] )/2)
+}
+  
+fitsDF = bind_rows(fitsList)
+
+(susceptibilitySizeSimPlot = ggplot(meanSusceptibility, aes(size, meanChi)) + geom_point(aes(color = noise, group = as.factor(noise))) + 
+    geom_line(data = fitsDF, aes(size, pred, color = noise, group = noise), size = 1) + geom_errorbar(aes(ymax = meanChi + sdChi/sqrt(count), ymin = meanChi - sdChi/sqrt(count))) + scale_color_gradient(name = expression(paste(eta))) + theme(legend.position = c(0.2, 0.8)) + scale_x_continuous(name = expression(paste("Size (",N^frac(1,2),")"))) + ylab(expression(chi)))
+save_plot("susceptibilitysizePlot.pdf", susceptibilitySizeSimPlot)
+
+
+  (tempPlot = ggplot(meanSusceptibility, aes(size, meanChi)) + geom_point(aes(color = noise, group = as.factor(noise))) + 
+    geom_line(data = modelPredictions, aes(size, pred), size = 1, color = "red") + geom_errorbar(aes(ymax = meanChi + sdChi/sqrt(count), ymin = meanChi - sdChi/sqrt(count))) + scale_color_gradient(name = expression(paste(eta))) + theme(legend.position = c(0.2, 0.8)) + scale_x_continuous(name = expression(paste("Size (",N^frac(1,2),")"))) + ylab(expression(chi)))
+save_plot(paste("susceptibilitySim_",thisNoise,".jpg", sep = ""), tempPlot)
+
+
+
+
+
+
+(susceptibilityNoiseSimPlot = ggplot(meanSusceptibility, aes(noise, meanChi, color = sqrt(numParticles), group = as.factor(numParticles))) + geom_point() +
+    geom_errorbar(aes(ymax = meanChi + sdChi/sqrt(count), ymin = meanChi - sdChi/sqrt(count))) + stat_smooth(method = "lm", se = F) + 
+    geom_vline(xintercept = 0.3, color = "red", linetype = "dashed") + scale_x_continuous(name = expression(eta)) + ylab(expression(chi)) + scale_color_gradient(name = expression(paste("Size (",N^frac(1,2),")"))) + geom_point(data = filter(meanSusceptibility, noise == 0.3), color = "red", size = 4))
+save_plot("susceptibilityNoiseSimPlot.pdf", susceptibilityNoiseSimPlot)
+
+#susceptibilityNoiseRelation = plot_grid(susceptibilitySizeSimPlot, susceptibilityNoiseSimPlot, labels = "AUTO")
+#save_plot("susceptibilityNoise.pdf", susceptibilityNoiseRelation, base_width = 20, base_height = 8)
+```
+
+
+
+```{r figureSimulation, cache=T, dependson="simulationSusceptibility"}
+(corrProfilesSimPlot = rescaledProfiles %>% filter(noise < 0.1) %>% ggplot(aes(domain, meanVCorr, group=groupID, color=sqrt(numParticles))) + geom_line(size=1) + geom_hline(yintercept = 0, linetype=2) +  scale_color_gradient(name=expression(paste("Size (",N^frac(1,2),")"))))
+
+(fluctFieldPlot = ggdraw() +
+  draw_plot(originalFieldSim, 0, 0, 0.5, 1) +
+  draw_plot(fluctFieldSim, 0.5, 0, 0.5, 1))
+
+
+(scaleFreePlot = plot_grid(rescaledMatched, simulationScaleFree))
+
+(decayMeasuresPlot = plot_grid(slopeAreaRelationSim, susceptibilitySizeSimPlot))
+
+(simulationAnalysisPlot = plot_grid(originalFieldSim, fluctFieldSim, rescaledMatched, simulationScaleFree, slopeAreaRelationSim, susceptibilitySizeSimPlot, ncol = 2, labels = "AUTO"))
+save_plot(filename = paste(simDir,"simAnalysis.pdf",sep="/"), simulationAnalysisPlot, base_width = 12, base_height = 24)
+
+
+## Try making a square guide
+gridPlot = expand.grid(Heading = seq(from = -pi, to = pi, by = pi/30), Speed = round(seq(from = 0, to = maxSpeed, length.out = 10), digits = 3))
+cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
+
+(gridLegend = ggplot(gridPlot, aes(Heading, Speed, alpha=Speed, fill = Heading)) + geom_tile() + scale_fill_gradientn(colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha=F, fill=F) + scale_x_continuous(name = expression(theta), breaks = c(-pi,0,pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) +
+  scale_y_continuous(name="S (a.u.)", breaks = c(0,round(maxSpeed, digits = 3))))
+
+
+
+plotrows = 3
+plotcols = 2
+(simulationAnalysisPlot = ggdraw() +
+  draw_plot(fluctFieldSim, 0, 2/plotrows, 1/plotcols, 1/plotrows) +
+  draw_plot(simulationScaleFree, 1/plotcols, 2/plotrows, 1/plotcols, 1/plotrows) +
+  draw_plot(gridLegend, 0.4, 0.66, 0.15, 0.075) +
+  draw_plot(rescaledMatched, 0, 0.33, 0.5, 0.33) +
+  draw_plot(slopeAreaRelationSim, 0.5, 0.33, 0.5, .33) +
+  draw_plot(susceptibilitySizeSimPlot, 0, 0, 0.5, 0.33) +
+  draw_plot(susceptibilityNoiseSimPlot, 0.5, 0, 0.5, 0.33) +
+  draw_plot_label(label = c("A","B","C","D", "E", "F"),
+                  x = c(0, 0.5, 0, 0.5, 0, 0.5),
+                  y = c(1, 1, 2/plotrows, 2/plotrows, 1/plotrows, 1/plotrows), size = 24))
+
+save_plot("simAnalysis.pdf", simulationAnalysisPlot, base_width = 15, base_height = 24)
+```
+
+
+# Additional tests
+
+## Measure susceptibility based on polarization fluctuations
+
+```{r susceptBinderFromOrder, cache=T, dependson="orderMeasures"}
+# Perform calculation for all order data.
+orderMeasures = read_rds("relevantOrderData.rds")
+meanSizes = read_csv("meanSizes.csv")
+
+orderMeasures = select(meanSizes, folder, EquivalentDiameter) %>% inner_join(orderMeasures)
+
+orderSuscept = orderMeasures %>% mutate(orderSquared = orderToCalc^2) %>% group_by(folder) %>% summarise(meanOrder = mean(orderToCalc), meanSquaredOrder = mean(orderSquared), meanSize = mean(EquivalentDiameter)) %>% mutate(susceptibility = meanSize * (meanSquaredOrder - meanOrder^2))
+
+(susceptOrderPlot = ggplot(orderSuscept, aes(meanSize, susceptibility)) + geom_point() + scale_y_continuous(expression(chi[o])) + scale_x_continuous(expression(paste("Diameter (",mu,"m)",sep=""))) + scale_color_gradient(TeX("\\sqrt{N}")))
+save_plot(filename = paste(projectFolder, "susceptFromOrder.pdf", sep = "/"), susceptOrderPlot)
+save_plot(paste(projectFolder, "susceptFromOrder.pdf", sep = "/"), susceptOrderPlot)
+
+# Calculate the Binder cumulant based on the unified order measure.
+orderBinder = orderMeasures %>% mutate(orderSquared = orderToCalc^2, orderQuart = orderToCalc^4) %>% group_by(folder) %>%
+  summarise(meanQuart = mean(orderQuart), meanSquared = mean(orderSquared), meanSize = mean(EquivalentDiameter)) %>% 
+  mutate(binderCumulant = 1 - meanQuart / (3 * meanSquared^2))
+(allBinder = ggplot(orderBinder, aes(meanSize, binderCumulant)) + geom_point() + scale_y_continuous("U") + 
+    scale_x_continuous(expression(paste("Diameter (",mu,"m)", sep=""))) + scale_color_gradient(TeX("\\sqrt{N}")))
+
+# Get the relationship between effective noise an susceptibility.
+susceptibilityBinned = energyMeasures %>% inner_join(orderMeasures) %>% mutate(ratioBin = cut(energyRatio, breaks = seq(from = -1, to = 1.1, by = 0.25), right = T), sizeBin = cut(EquivalentDiameter, breaks = seq(from = 0, to = 1700, by = 250))) %>% mutate(orderSquared = orderToCalc^2) %>% group_by(ratioBin, sizeBin) %>%
+  summarise(meanSize = mean(EquivalentDiameter), meanOrder = mean(orderToCalc), meanOrderSquared = mean(orderSquared)) %>%
+  mutate(susceptibility = meanSize * (meanOrderSquared - meanOrder^2))
+
+ggplot(susceptibilityBinned, aes(sizeBin, ratioBin, fill= susceptibility)) + geom_tile()
+```
+
+## Determine effect of size and noise on fluctuation magnitude.
+
+```{r fluctMagnitude, cache=T, dependson="correlationProfiles"}
+
+
+if (!file.exists(paste(simDir,"fieldProps.rds",sep="/"))) {
+  cl = makeCluster(7)
+  registerDoParallel(cl)
+
+  thisProps = foreach(entry = 1:nrow(metadata), .combine = "rbind", .packages = c("dplyr", "collective", "readr", "tidyr", "purrr")) %dopar% {
+    
+    fieldsData = read_rds(as.character(metadata$filename[[entry]])) %>% group_by(Frame) %>% nest(.key = "velocityField") %>% 
+      mutate(fluctuationField = map(velocityField, calculateFluctuationField)) %>% unnest() %>%  
+      mutate(velMag = sqrt(vX^2 + vY^2), fluctMag = sqrt(fluctX^2 + fluctY^2), remX = vX - fluctX, remY = vY - fluctY) %>%
+      mutate(remMag = sqrt(remX^2 + remY^2))
+    
+    summarise_each(fieldsData, funs(mean,sd), c(velMag, fluctMag, remMag)) %>% mutate(nVectors = nrow(fieldsData))
+  }
+  stopCluster(cl)
+  write_rds(thisProps, paste(simDir,"fieldProps.rds",sep="/"))
+}
+thisProps = read_rds(paste(simDir,"fieldProps.rds",sep="/"))
+
+fieldPropsDF = cbind(metadata, thisProps)
+
+velNoise =ggplot(fieldPropsDF, aes(Noise, velMag_mean, color = sqrt(Size))) + geom_point() 
+velSize = ggplot(fieldPropsDF, aes(sqrt(Size), velMag_mean, color = Noise, group = Noise)) + geom_point() + theme(legend.position = "right") + stat_smooth(method = "lm", se=F)
+ggplot(fieldPropsDF, aes(sqrt(Size), Noise, fill = velMag_mean)) + geom_tile() + theme(legend.position = "top")
+
+fluctNoise = ggplot(fieldPropsDF, aes(Noise, fluctMag_mean, color = sqrt(Size), group = Size)) + geom_point() + theme(legend.position = "right")
+(fluctSize = ggplot(fieldPropsDF, aes(sqrt(Size), fluctMag_mean, color = Noise, group = Noise)) + geom_point() + theme(legend.position = "right") + stat_smooth(method = "lm", se=F))
+
+remNoise = ggplot(fieldPropsDF, aes(Noise, remMag_mean, color = sqrt(Size))) + geom_point() +  theme(legend.position = "right")
+remSize = ggplot(fieldPropsDF, aes(sqrt(Size), remMag_mean, color = Noise, group = Noise)) + geom_point() + theme(legend.position = "right") + stat_smooth(method = "lm", se=F)
+
+velocityProps = plot_grid(velSize, fluctSize, remSize, velNoise, fluctNoise, remNoise, ncol = 3, labels = "AUTO")
+save_plot("figures/SimStatProps.pdf", velocityProps, base_width = 27, base_height = 16)
+```
+
+
+
+## Alternative susceptibility measure
+
+```{r alternateSusceptibility, cache = T, dependson="withFluctuations"}
+# First, determine the noise ratio for simulations.
+cl = makeCluster(7)
+registerDoParallel(cl)
+
+if (file.exists(paste(simDir, "meanVelocityFrame.rds", sep = "/")))
+  allParticleData = read_rds(paste(simDir, "meanVelocityFrame.rds", sep = "/"))
+
+allFields = foreach(thisDF = particleDFs, .packages = c("dplyr", "readr", "stringr", "tidyr")) %dopar% {
+  filename = basename(thisDF)
+  myNums = str_extract_all(filename,"[0-9.]+")
+  noise = as.numeric(myNums[[1]][1])
+  particles = as.numeric(myNums[[1]][[2]])
+  replicate = as.numeric(myNums[[1]][[3]])
+  particleData = read_rds(thisDF) %>% mutate(speed = sqrt(vX^2 + vY^2), noise = noise, size = particles, replicate = replicate)
+  avgSpeedPerFrame = particleData %>% group_by(noise, size, replicate, Frame) %>% summarise(meanVX = mean(vX), meanVY = mean(vY))
+}
+stopCluster(cl)
+
+allParticleData = bind_rows(allFields)
+write_rds(allParticleData, paste(simDir, "meanVelocityFrame.rds", sep = "/"))
+
+# Calculate the average velocity for each frame, to get V.
+simFrameFields = allParticleData %>% mutate(mVSpeed = sqrt(meanVX^2 + meanVY^2)) %>% mutate(squareSpeed = mVSpeed^2, quartSpeed = mVSpeed^4)
+
+# Get <V^2>, so average value over all frames.
+firstPart = simFrameFields %>% group_by(noise, size) %>% summarise(avgSquaredV = mean(squareSpeed), avgQuartV = mean(quartSpeed))
+
+# Get <V>^2 for all noise and number of particles.
+secondPart = simFrameFields %>% group_by(noise, size) %>% summarise(avgV = mean(mVSpeed)) %>% mutate(avgVSquared = avgV^2)
+
+# (<V^2>-<V>^2)
+# inner_join(firstPart, secondPart) 
+totalCalc = inner_join(firstPart, secondPart) %>% mutate(magSuscept = avgSquaredV - avgVSquared) %>%
+  mutate(binderCumulant = 1 - ( avgQuartV / (3 * avgSquaredV^2)))
+
+(magneticSusceptibilityPlot = ggplot(totalCalc, aes(noise, magSuscept, color = sqrt(size), group = size)) + geom_point() + geom_line() + theme(legend.position = "right"))
+
+(binderPlot = ggplot(totalCalc, aes(noise, binderCumulant, color = sqrt(size), group = size)) + geom_point() + geom_line() + theme(legend.position = "right") + annotate("rect", fill = "yellow", alpha = 0.4, xmin = 0.3, xmax = 0.35, ymin = -Inf, ymax = Inf))
+save_plot("figures/magneticSusceptibility.pdf", magneticSusceptibilityPlot, base_width = 15, base_height = 8)
+```
+
+
+
+```{r modifiedSimulationFigure, cache = T}
+#Figure simulation
+
+# 		a. Simulation snapshot of fluctuations.
+fluctFieldSim
+# 		b. Scale-free correlations in simulation at all noise levels.
+simulationScaleFree
+# 		c. Binder cumulant plot for simulations. What is criticality range?
+binderPlot
+# 		d. Order parameter in Placozoa at different sizes.
+noiseRatioAnimal
+# 		e. Order parameter and noise for simulations at different sizes. Shade region at criticality and regions that describe animal variability.
+# Simulation susceptibility.
+noiseRatioSim
+#     f. Simulation susceptibility.
+susceptibilitySizeSimPlot
+
+
+ggdraw() + draw_plot(fluctFieldSim, 0, 0.66, 0.5, 0.33) +
+  draw_plot(simulationScaleFree, 0.5, 0.66, 0.5, 0.33)
+fluctFieldSim
+simulationScaleFree
+susceptibilitySizeSimPlot
+binderPlot
+sizeRelUPlot
+sizeOrderPlot
+# Insets
+orderWithInset = orderNoisePlot + theme(legend.position = "right") + draw_plot(sizeOrderPlot + theme_bw(base_size = 20) + theme(axis.title = element_text(size = 18), axis.title.y = element_blank(), legend.position = c(1.4,1)), 0.4, 0.4, 0.45, 0.6)
+relUWithInset = relUNoisePlot + theme(legend.position = "right") + draw_plot(sizeRelUPlot + theme_bw(base_size = 18) + theme(axis.title.x = element_text(size = 18), axis.title.y = element_blank(), legend.position = c(1.35,2)), 0.4, 0, 0.45, 0.6)
+
+
+simulationNewPlot = plot_grid(fluctFieldSim, binderPlot, simulationScaleFree, susceptibilitySizeSimPlot, orderWithInset, relUWithInset, ncol = 2, labels = "AUTO", label_size = 36)
+save_plot("simulationPlot.pdf", simulationNewPlot, base_width = 12, base_height = 14)
+```
+
+
+# WEIRD PAWEL ANALYSIS, do not use.
+
+
+```{r plotGoodData, cache=T}
+avgDataPawel = read_delim("SimulationGood/meanAvgResults.dat", delim = " ", col_names = F)
+colnames(avgDataPawel) = c("Noise", "Size", "Replicate", "Order", "MeanV", "MeanVSquared", "MeanVFourth", "MeanKinetic")
+
+avgDataPawel = avgDataPawel %>% mutate(relU = 1 - MeanV/sqrt(MeanKinetic)) %>% mutate(Binder = 1 - (MeanVFourth/ (3*MeanVSquared^2))) %>%
+  mutate(Susceptibility = MeanVSquared - MeanV^2)
+
+avgDataAggr = avgDataPawel %>% group_by(Noise, Size) %>% summarise_each(Order:Susceptibility, funs = c("mean", "sd"))
+avgDataCount = avgDataPawel %>% group_by(Noise, Size) %>% summarise(count = n())
+avgDataAggr = inner_join(avgDataAggr, avgDataCount)
+
+(orderNoisePlot = ggplot(avgDataAggr, aes(Noise, Order_mean, group = Size, color = sqrt(Size))) + geom_point() + geom_errorbar(aes(ymin = Order_mean - Order_sd/sqrt(count), ymax = Order_mean + Order_sd/sqrt(count))) + geom_line() + 
+    scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.2)) + 
+    scale_y_continuous(name = "Order", breaks = c(0, 0.5, 1.00)) + 
+    scale_color_gradient(name = expression(paste(N^frac(1,2))), breaks = c(25,75,125)) +
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.32, xmax = 0.37, fill = "red", alpha = 0.5))
+
+
+(relUNoisePlot = ggplot(avgDataAggr, aes(Noise, relU_mean, group = Size, color = sqrt(Size))) + geom_point() + geom_errorbar(aes(ymin = relU_mean - relU_sd/sqrt(count), ymax = relU_mean + relU_sd/sqrt(count))) + geom_line() + 
+    scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.2)) + 
+    scale_y_continuous(name = expression(omega), breaks = c(0, 0.5, 1.00)) + 
+    scale_color_gradient(name = expression(paste(N^frac(1,2))), breaks = c(25,75,125)) +
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.32, xmax = 0.37, fill = "red", alpha = 0.5))
+
+(binderPlot = avgDataAggr[-25,] %>% ggplot(aes(Noise, Binder_mean, group = Size, color = sqrt(Size))) + geom_point() + 
+  geom_line() + 
+    scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.1)) + 
+    scale_y_continuous(name = expression(U)) + 
+    scale_color_gradient(name = expression(paste(N^frac(1,2))), breaks = c(25,75,125)) + 
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.32, xmax = 0.37, fill = "red", alpha = 0.5))
+
+
+ggplot(avgDataAggr, aes(Noise, Susceptibility_mean, group = Size, color = sqrt(Size))) + geom_point() + geom_line() + scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.1)) + scale_y_continuous(name = expression(chi), breaks = c(0, 0.5, 1.00)) + scale_color_gradient(name = expression(paste(N^frac(1,2))))
+
+
+(sizeRelUPlot = filter(avgDataAggr, Noise %in% c(0.1, 0.35, 0.6))  %>% ggplot(aes(sqrt(Size), relU_mean, group = Noise, color = as.factor(Noise))) + geom_point() + geom_errorbar(aes(ymax = relU_mean + relU_sd/sqrt(count), ymin = relU_mean - relU_sd/sqrt(count)), alpha = 0.3) + geom_line() + theme(legend.position = "right") + 
+    scale_y_continuous(name = expression(omega), limits = c(0,1), breaks = c(0, 0.5, 1)) + 
+    scale_x_continuous(name = expression(paste("Size (",N^frac(1,2),")"))) +
+    scale_color_manual(name = expression(eta), values = c("black", "red", "grey")))
+
+(sizeOrderPlot = filter(avgDataAggr, Noise %in% c(0.1, 0.35, 0.6))  %>% ggplot(aes(sqrt(Size), Order_mean, group = Noise, color = as.factor(Noise))) + geom_point() + geom_errorbar(aes(ymax = Order_mean + Order_sd/sqrt(count), ymin = Order_mean - Order_sd/sqrt(count)), alpha = 0.3) + geom_line() + theme(legend.position = "right") + 
+    scale_y_continuous(name = "Order", limits = c(0,1), breaks = c(0, 0.5, 1)) + 
+    scale_x_continuous(name = expression(paste(" Size (",N^frac(1,2),")"))) +
+    scale_color_manual(name = expression(eta), values = c("black", "red", "grey")))
+
+
+binderPlot
+sizeRelUPlot
+sizeOrderPlot
+# Insets
+orderNoisePlot
+relUNoisePlot
+
+sizeFluctEffect = avgDataAggr %>% select(Noise, Size, relU_mean) %>% spread(key = Size, value = relU_mean) %>%
+  mutate(growth = `16384` / `512`)
+ggplot(sizeFluctEffect, aes(Noise, growth)) + geom_point() + geom_line()
+```

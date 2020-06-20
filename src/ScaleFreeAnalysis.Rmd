@@ -24,20 +24,20 @@ masterDir = "E:/Placozoa/HighMagTracked"
 weirdFolders = c("2014-09-19-run_1", "2014-09-13-run_2", "2014-09-11-run_1", "2014-06-20-run_1", "2014-09-17-run_1", "2015-02-24-run_2")
 
 # Packages made by others.
-require(tidyverse)
-require(forcats)
-require(rhdf5)
-require(cowplot)
-require(jpeg)
-require(grid)
-require(alphahull)
-require(modelr)
-require(polynom)
-require(stringr)
-require(pracma)
-require(sp)
-require(latex2exp)
-require(zoo)
+library(tidyverse)
+library(forcats)
+library(rhdf5)
+library(cowplot)
+library(jpeg)
+library(grid)
+library(alphahull)
+library(modelr)
+library(polynom)
+library(stringr)
+library(pracma)
+library(sp)
+library(latex2exp)
+library(zoo)
 
 # Set up parallel processing environment.
 library(multidplyr)
@@ -46,10 +46,10 @@ set_default_cluster(cl)
 
 
 # My own packages.
-require(bigh5)
-require(collective)
-require(scalefree)
-require(mover)
+library(bigh5)
+library(collective)
+library(scalefree)
+library(mover)
 
 
 # Constants needed to convert to real units.
