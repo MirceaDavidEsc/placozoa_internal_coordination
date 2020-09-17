@@ -12,7 +12,7 @@ output:
 
 
 ```{r setup}
-projectFolder = "D:/Mircea/Projects/RESEARCH/InternalCoordination/"
+projectFolder = dirname(getwd())
 dropboxFolder = "C:/Users/mirce/Dropbox/ForPawel_Results"
 processedDataFolder = "Data_Processed"
 originalDataFolder = "Data_Original"
@@ -20,7 +20,7 @@ knitr::opts_knit$set(root.dir = projectFolder)
 hdf5Identifier = "longformOpticalFlow.hdf5"
 masterDir = "E:/Placozoa/HighMagTracked"
 
-# These foldeers need to be curated.
+# These folders need to be curated.
 weirdFolders = c("2014-09-19-run_1", "2014-09-13-run_2", "2014-09-11-run_1", "2014-06-20-run_1", "2014-09-17-run_1", "2015-02-24-run_2")
 
 # Packages made by others.
