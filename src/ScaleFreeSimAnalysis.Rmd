@@ -23,43 +23,46 @@ masterDir = "E:/Placozoa/HighMagTracked"
 
 
 # Packages made by others.
-require(tidyverse)
-require(forcats)
-require(rhdf5)
-require(cowplot)
-require(jpeg)
-require(grid)
-require(alphahull)
-require(modelr)
-require(polynom)
-require(stringr)
-require(pracma)
-require(sp)
-require(latex2exp)
-require(zoo)
-require(bigsplines)
+library(tidyverse)
+library(forcats)
+library(rhdf5)
+library(ggplot2)
+library(cowplot)
+library(jpeg)
+library(grid)
+library(alphahull)
+library(modelr)
+library(polynom)
+library(stringr)
+library(pracma)
+library(sp)
+library(latex2exp)
+library(zoo)
+library(bigsplines)
 
 
-# My own packages.
-require(bigh5)
-require(collective)
-require(scalefree)
-require(mover)
+# My own packages. Call the below function if they do not load
+#package_installs()
+
+library(bigh5)
+library(collective)
+library(scalefree)
+library(mover)
+
 
 
 # Set up parallel processing environment.
 library(multidplyr)
-cl = create_cluster(7)
-set_default_cluster(cl)
-cl = cl %>% cluster_library("scalefree") %>% cluster_library("dplyr") %>% cluster_library("purrr") %>% 
-  cluster_library("tidyr") %>% cluster_library("stringr") %>% cluster_library("readr") %>% cluster_library("collective") %>%
-  cluster_library("bigsplines") %>% cluster_library("alphahull")
+
+cl = multidplyr::new_cluster(11)
+cl = cluster_library(cl, packages = c("dplyr", "purrr", "tidyr", "stringr", "readr", "collective", "bigsplines", "alphahull"))
+#TODO: need to fix "scalefree" to add it back into cluster library
 
 # Make the plots prettier.
 cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
 theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.title=element_text(size = 18, hjust = 0.5), axis.text=element_text(size = 18), legend.title = element_text(size = 18, face = "bold"), legend.text = element_text(size = 12, face="plain"))
 
-simDir = "D:/Mircea/Projects/RESEARCH/InternalCoordination/Data_Original/PawelSimulations/SimData_nonnorm_fluid/"
+simDir = paste(projectFolder, "/Data_Original/PawelSimulations/SimData_nonnorm_fluid/", sep = "")
 # For doing fluid network simulations only
 # simDir = 'D:/Mircea/Projects/RESEARCH/InternalCoordination/PawelSimulations/PawelFluid' #paste(projectFolder,params$sim_dir, sep="")
 ```
@@ -71,14 +74,7 @@ The data were already normalized previously. For help, see simulFunctions.R on h
 # Produce an example velocity field with fluctuations
 
 ```{r particeDFs, cache = T}
-particleDFs = list.files(path = simDir, pattern="*sampledFrames.rds", full.names=T, recursive = T)
-metadata = data.frame(filename = particleDFs, stringsAsFactors = F) %>% mutate(processedFiles = str_replace(filename, "sampledFrames", "nestedFrames"))
-numericals = str_extract_all(basename(particleDFs), "[0-9.]+", simplify = T)[,1:3]
-numericals = matrix(as.numeric(unlist(numericals)), ncol = ncol(numericals))
-metadata = cbind(metadata, numericals)
-colnames(metadata) = c("filename", "processedFile", "Noise", "Size", "Replicate")
-metadata = arrange(metadata, Noise, Size)
-
+metadata = list_sim_data_info(simDir, "*sampledFrames.rds")
 
 criticalityFiles = filter(metadata, Size == 16384 & Noise == 0.35)
 criticalityFrames = read_rds(criticalityFiles$filename[[1]])
