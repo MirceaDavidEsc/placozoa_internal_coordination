@@ -1,106 +1,105 @@
 ---
-title: "Scale-free analysis: simulations"
+title: "Simulation analysis"
 author: "Mircea Davidescu"
-date: "December 28, 2016"
+date: "11/2/2020"
 output: html_document
-params:
-  sim_dir: "D:/Mircea/Projects/RESEARCH/InternalCoordination/PawelSimulations/SimData_nonnorm_fluid/"
-  timeLag: 3
 ---
 
-# SIMULATION ANALYSIS BEGINS HERE
+```{r setup, include=FALSE}
+source("load_setup.R")
+```
+
+
+
+# Simulation data analysis
 
 Below is the simulation analysis that is used to determine if our results are only present at the critical phase transition or if they are generic to the system.
 * SzaboSim: simulations based on the Szabo et al. 2006 model, which does not include explicit alignment.
 * SimData_nonnorm: like Szabo et al. 2006 model, but forces are not normalized by the total number of interacting individuals.
 
 
-```{r setup}
-projectFolder = "D:/Mircea/Projects/RESEARCH/InternalCoordination/"
-knitr::opts_knit$set(root.dir = projectFolder)
-hdf5Identifier = "longformOpticalFlow.hdf5"
-masterDir = "E:/Placozoa/HighMagTracked"
+```{r sim_setup}
+# Was using SimData_nonorm_fluid before
+# For the Szabo model of the main text, use: SimData_Szabo_new_out
+# For the fixed lattice model of the SI, use: SimData
 
+simDir = paste(projectFolder, "/Data_Original/PawelSimulations/SimData_Szabo_new_out/", sep = "") 
+source(paste(projectFolder, "/src/ScaleFreeSimAnalysis_functions.R", sep = "/"))
+source(paste(projectFolder, "/src/simulFunctions.R", sep = "/"))
 
-# Packages made by others.
-library(tidyverse)
-library(forcats)
-library(rhdf5)
-library(ggplot2)
-library(cowplot)
-library(jpeg)
-library(grid)
-library(alphahull)
-library(modelr)
-library(polynom)
-library(stringr)
-library(pracma)
-library(sp)
-library(latex2exp)
-library(zoo)
-library(bigsplines)
+cluster = new_cluster(11)
+cluster_library(cluster, c("tidyverse", "bigh5", "collective", "scalefree", "mover"))
 
+metadata = list_sim_data_info(simDir, "*sampledFrames*") %>%
+  mutate(orderFile = str_replace(filename, "sampledFrames", "orderFrames"))
 
-# My own packages. Call the below function if they do not load
-#package_installs()
-
-library(bigh5)
-library(collective)
-library(scalefree)
-library(mover)
-
-
-
-# Set up parallel processing environment.
-library(multidplyr)
-
-cl = multidplyr::new_cluster(11)
-cl = cluster_library(cl, packages = c("dplyr", "purrr", "tidyr", "stringr", "readr", "collective", "bigsplines", "alphahull"))
-#TODO: need to fix "scalefree" to add it back into cluster library
-
-# Make the plots prettier.
-cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
-theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.title=element_text(size = 18, hjust = 0.5), axis.text=element_text(size = 18), legend.title = element_text(size = 18, face = "bold"), legend.text = element_text(size = 12, face="plain"))
-
-simDir = paste(projectFolder, "/Data_Original/PawelSimulations/SimData_nonnorm_fluid/", sep = "")
-# For doing fluid network simulations only
-# simDir = 'D:/Mircea/Projects/RESEARCH/InternalCoordination/PawelSimulations/PawelFluid' #paste(projectFolder,params$sim_dir, sep="")
 ```
-
 
 The data were already normalized previously. For help, see simulFunctions.R on how this was done by Pawel.
 
-
-# Produce an example velocity field with fluctuations
+## Snapshot of simulation, visual
 
 ```{r particeDFs, cache = T}
-metadata = list_sim_data_info(simDir, "*sampledFrames.rds")
-
-criticalityFiles = filter(metadata, Size == 16384 & Noise == 0.35)
+criticalityFiles = filter(metadata, Size == 16384 & Noise == 1.45)
 criticalityFrames = read_rds(criticalityFiles$filename[[1]])
-criticalityFrame = criticalityFrames %>% filter(Frame == unique(Frame)[190]) %>% select(-Frame) %>% calculateFluctuationField() %>% mutate(angle = atan2(x = fluctX, y = fluctY), speed = sqrt(fluctX^2 + fluctY^2))
-(criticalNoisePlot = ggplot(criticalityFrame, aes(X, Y, color = angle, alpha = speed)) + geom_point() + coord_fixed() + scale_color_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha = F) + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank()))
-write_rds(x = criticalityFrame, path = paste(projectFolder,"FigureData/simulation_sample_frame_noise_fluid.rds", sep = ""))
-save_plot(paste(paste(projectFolder,"FigureData/", sep = ""), "3A_criticalNoise.pdf", sep = "/"), criticalNoisePlot)
+selectedFrame = unique(criticalityFrames$Frame)[[3]]
+
+criticalityFrame = criticalityFrames %>% filter(Frame == selectedFrame) %>% select(-Frame) %>% 
+  calculateFluctuationField() %>% 
+  mutate(angle = atan2(x = fluctX, y = fluctY), speed = sqrt(fluctX^2 + fluctY^2))
+
+
+
+(criticalNoisePlot = plot_simulation_snapshot(criticalityFrame))
+write_rds(x = criticalityFrame, path = paste(projectFolder,"Data_Processed/simulation_sample_frame.rds", sep = "/"))
+save_plot(paste(projectFolder, "/figures/3A_criticalNoise.pdf", sep = ""), criticalNoisePlot)
 
 ```
 
-## Get the fluctuation field and alpha hull.
+## Processing the data
 
-```{r processDataFiles, cache=T, dependson = "particleDFs"}
-mapProcessData = function(dataFile, processedFile) {
-  vFieldData = read_rds(dataFile) %>% mutate(X = jitter(X,1), Y = jitter(Y, 1)) %>% group_by(Frame) %>% nest(.key = "velocityField")
-  ahullData = vFieldData %>% mutate(noBoundary = map(velocityField, function(x) {removeBoundary(x, 0.1, ballSize = 30)})) %>%
-    mutate(fluctuationaField = map(noBoundary, calculateFluctuationField))
-  write_rds(ahullData, processedFile)
-  return(TRUE)
+### PROCESSING: producing fluctuation fields
+
+```{r produce_fluctuation_fields}
+needsProcessing = metadata %>% filter(!file.exists(processedFile)) %>%
+  filter(!str_detect(filename, "_NA"))
+
+for (i in 1:nrow(needsProcessing)) {
+  dataFile = needsProcessing$filename[[i]]
+  print(paste("Processing file",i,"of",nrow(needsProcessing),": ",dataFile))
+  processedFile = needsProcessing$processedFile[[i]]
+  
+  vFieldData = read_rds(dataFile) %>% group_by(Frame) %>% nest() %>%
+    mutate(bulkData = map(data, removeBoundary))
+  
+  vFieldData = vFieldData %>% 
+    partition(cluster) %>% 
+    mutate(fluctuationaField = map(bulkData, calculateFluctuationField)) %>%
+    collect()
+  
+  write_rds(vFieldData, processedFile)
 }
+```
 
-cluster_copy(cl, mapProcessData)
-needsProcessing = metadata %>% mutate(doneAlready = file.exists(processedFile)) %>% filter(!doneAlready)
+### PROCESSING: calculating order values for each frame
 
-if (nrow(needsProcessing) != 0) {
-  processData = needsProcessing %>% partition() %>% mutate(makeNewFile = map2(filename, processedFile, mapProcessData)) %>% collect()  
+```{r calculate_order_values}
+needsProcessing = metadata %>% filter(file.exists(processedFile) & !file.exists(orderFile)) %>%
+  filter(!str_detect(filename, "_NA"))
+
+for (i in 1:nrow(needsProcessing)) {
+  processedFile = needsProcessing$processedFile[[i]]
+  print(paste("Processing file",i,"of",nrow(needsProcessing), processedFile))
+  
+  orderMeasures = read_rds(processedFile) %>%
+    mutate(rotation = map(bulkData, measureRotation),
+           polarization = map(bulkData, measurePolarization),
+           dilatation = map(bulkData, measureDilatation)) %>%
+    select(-data, -bulkData, -fluctuationaField) %>%
+    unnest(c(rotation, polarization, dilatation)) %>%
+    mutate(collectiveOrder = sqrt(rotation^2 + polarization^2 + dilatation^2))
+  
+  write_rds(orderMeasures, needsProcessing$orderFile[[i]])
 }
 ```
 
@@ -108,57 +107,41 @@ if (nrow(needsProcessing) != 0) {
 ## Measure order parameters for each frame.
 
 ```{r orderData, cache=T, dependson="processData"}
-# Function: parallelized implementation for calculating order measures (1 animal per cluster)
 
-orderData = read_rds(paste(simDir, "orderData_sim_noise_fluid.rds", sep = "/"))
+orderData_complete = bindFilesInList(metadata$orderFile) %>% rename(orderFile = file)
 
-orderDataSummary = group_by(orderData, Noise, Size) %>% summarise(meanOrder = mean(Order), sdOrder = sd(Order), count = n())
+orderData_wMeta = inner_join(orderData_complete, metadata)
 
-(orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + scale_y_continuous("Order") + scale_x_continuous(expression(eta), breaks = seq(0,0.8,0.1)) + 
-  scale_color_gradient(TeX("\\sqrt{N}")) + annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.32, xmax = 0.37, fill = "red", alpha = 0.5))
-save_plot(paste(paste(projectFolder,"FigureData/", sep = ""), "3B_NoiseOrder_fluid.pdf", sep = "/"), criticalNoisePlot)
+orderDataSummary = orderData_wMeta %>% group_by(Noise, Size) %>% summarise(meanOrder = mean(collectiveOrder), sdOrder = sd(collectiveOrder), count = n())
 
-write_rds(orderDataSummary, paste(projectFolder, "orderData_noise.rds", sep = ""))
+(orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + scale_y_continuous("Order") +
+    scale_x_continuous(expression(eta)) + 
+  scale_color_gradient(TeX("\\sqrt{N}")) + annotate("rect", ymax = Inf, ymin = -Inf, xmin = 1.4, xmax = 1.6, fill = "red", alpha = 0.5))
+save_plot(paste(paste(projectFolder,"/figures/", sep = ""), "3B_NoiseOrder_fluid.pdf", sep = "/"), orderNoisePlot)
 
-
-#(orderSizePlot = ggplot(orderDataSummary, aes(sqrt(Size), meanOrder, color = Noise, group = Noise)) + geom_point() + geom_line() + scale_colour_gradient2(high = "blue", low = "black", mid = "red", midpoint = 0.35))
+write_csv(orderDataSummary, paste(projectFolder, "/Data_Processed/orderData_noise.csv", sep = ""))
 ```
 
 
 ## Fluctuation fraction
 
 ```{r fluctuationEnergy, cache=T, dependson = "processData"}
-mapEnergyFraction = function(processedFile) {
-  unnestedVF = read_rds(processedFile) %>% select(Frame, noBoundary, fluctuationaField) %>%
-    unnest()
-  unnestedVF = unnestedVF[,-c(2,3)]
-  unnestedVF = unnestedVF %>% mutate(vEnergy = vX^2 + vY^2, uEnergy = fluctX^2 + fluctY^2)
-  
-  energyMeasures = unnestedVF %>% group_by(Frame) %>% summarise(meanVE = mean(vEnergy), meanUE = mean(uEnergy)) %>%
-  mutate(energyRatio = meanUE / meanVE) %>% ungroup()
-  write_rds(x = energyMeasures, path = paste(dirname(processedFile), "/energyMeasures.rds"))
-  return(energyMeasures)
-}
 
+cluster = cluster_copy(cluster, "mapEnergyFraction")
 
-cl = cluster_copy(cl, mapEnergyFraction)
+metadata = metadata %>% mutate(energyFile = str_replace(processedFile, "nested", "energy"))
 
-if (file.exists(paste(simDir, "energyData.rds", sep = "/"))){
-  oldEnergyData = read_rds(paste(simDir, "energyData.rds", sep = "/"))
-  needsEnergy = metadata %>% anti_join(oldEnergyData)
-} else {
-  needsEnergy = metadata
-}
+needsEnergy = metadata %>% filter(!file.exists(energyFile))
 
 if (nrow(needsEnergy) != 0) {
-  energyMeasures = needsEnergy %>% partition() %>% mutate(energyDF = map(processedFile, mapEnergyFraction)) %>% collect() %>% 
+  energyMeasures = needsEnergy %>% partition(cluster) %>% 
+    mutate(energyDF = map(processedFile, mapEnergyFraction)) %>% collect() %>% 
     select(Noise, Size, Replicate, energyDF) %>% unnest()
 }
 
 
-energyMeasures = oldEnergyData %>% arrange(Noise, Size)
+energyData_complete = bindFilesInList(metadata$energyFile)
 write_rds(energyMeasures, paste(simDir, "energyData.rds", sep = "/"))
-write_rds(energyMeasures, paste(projectFolder, "FigureData/energyData_noise_fluid.rds", sep = "/"))
 ```
 
 
@@ -299,6 +282,9 @@ simPlot = plot_grid(criticalSlopesPlot + theme(legend.position = c(0.1, 0.5), ax
 
 save_plot(plot = simPlot, paste(simDir, "simPlot.pdf", sep = "/"), base_width = 14, base_height = 12)
 ```
+
+
+
 
 ## Alternative susceptibility calculation
 

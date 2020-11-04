@@ -10,81 +10,28 @@ output:
     highlight: pygments
 ---
 
+# Experimental data analysis
 
 ```{r setup}
-projectFolder = dirname(getwd())
-dropboxFolder = "C:/Users/mirce/Dropbox/ForPawel_Results"
-processedDataFolder = "Data_Processed"
-originalDataFolder = "Data_Original"
-knitr::opts_knit$set(root.dir = projectFolder)
-hdf5Identifier = "longformOpticalFlow.hdf5"
-masterDir = "E:/Placozoa/HighMagTracked"
-
-# These folders need to be curated.
-weirdFolders = c("2014-09-19-run_1", "2014-09-13-run_2", "2014-09-11-run_1", "2014-06-20-run_1", "2014-09-17-run_1", "2015-02-24-run_2")
-
-# Packages made by others.
-library(tidyverse)
-library(forcats)
-library(rhdf5)
-library(cowplot)
-library(jpeg)
-library(grid)
-library(alphahull)
-library(modelr)
-library(polynom)
-library(stringr)
-library(pracma)
-library(sp)
-library(latex2exp)
-library(zoo)
-
-# Set up parallel processing environment.
-library(multidplyr)
-cl = create_cluster(7)
-set_default_cluster(cl)
-
-
-# My own packages.
-library(bigh5)
-library(collective)
-library(scalefree)
-library(mover)
-
-
-# Constants needed to convert to real units.
-pxPerMicrometer = 0.752
-pxPerMicrometerHamm = 0.616
-micrometerPerVoxel = 8/pxPerMicrometer #8 px per vector field voxel, 0.752 px per micrometer.
-micrometerPerVoxelHamm = 8/pxPerMicrometerHamm
-fps = 2
-
-
-# A data frame to hold conversion factor constants, such as pixels per micron, and the amount of pixels per voxel. Also defined is the frames per second.
-conversionFactors = data.frame(hammMovie = c(T,F), pxPerMicron = c(0.616, 0.752), pxPerVoxel = 8, maxY = c(2048, 1040), maxX = c(2048, 1392))
-framePerSec = 2
-
-# Make the plots prettier.
-cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
-theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.title=element_text(size = 18, hjust = 0.5), axis.text=element_text(size = 18), legend.title = element_text(size = 18, face = "bold"), legend.text = element_text(size = 12, face="plain"))
+source("load_setup.R")
 ```
 
-# Process the data
+## Process the data
 
 ```{r processVectorFields, eval=FALSE}
 source(paste(projectFolder,"src/Step_1_Process_Data.R",sep="/"))
 ```
 
-# Collective order
+## Collective order
 
-## Calculate the collective order for each animal for each frame
+### Calculate the collective order for each animal for each frame
 
 ```{r relevantOrderData}
 source(paste(projectFolder,"/src/Step_2_Order_Measures.R", sep = "/"))
 ```
 
 
-## Plot the effect of size on collective order
+### Plot the effect of size on collective order
 
 ```{r plotOrderData, cache=T, dependson="allOrderMeasures"}
 relevantOrderData = read_rds(paste(projectFolder, processedDataFolder, "relevantOrderData.rds", sep = "/"))
@@ -165,14 +112,14 @@ orderValsHists = plot_grid(rotHist, polHist, dilHist, ncol = 1)
 save_plot(paste(projectFolder, "Figures", "orderPlot.pdf", sep="/"), orderPlot, base_height = 14, base_width = 19)
 ```
 
-# Collective order and fluctuation energy at phase transition
+## Collective order and fluctuation energy at phase transition
 
 Pawel suggested that I look at the relation between the relative fluctuation magnitude and collective order as another avenue with which to determine if we are at criticality. There should be a clear and inverse relationship between collective order and the magnitude of fluctuations within an animal. The basic intuition is that in a larger system we would expect a sharper transition between order and disorder. This is a consequence of the second-order phase transition. Essentially, there is a certain amount of energy from movement in the animal. We subtract a certain amount that goes into collective movements, leaving a fluctuation fraction. The amount of noise will determine what proportion of the original movement energy is lost into these fluctuations.
 
 Because we are dealing with a dynamical biological system, there should be some variation in the level of noise over time. At some times the animal will appear to be highly ordered, while at other times it will be very disordered. The major point is, though, that the fluctuation energy should be bound somewhere between 0 (all movement is going into a collective component) and 1 (all movement is going into fluctuation). This is the larger problem of the current setup that I have. If we consider the plot of the fluctuation magntiude against the collective order, these should be inversely correlated. Greater fluctuation magnitude means that less and less of the velocity is going into collective order. The slope can therefore be characterized for every animal.
 
 
-## Order and fluctuation magnitudes
+### Order and fluctuation magnitudes
 
 simply plot ORDER vs <u^2> (squared fluctuations) and have a look at this slopes
 
@@ -290,7 +237,7 @@ save_plot(paste(dropboxFolder, "Panels", "binnedSizeSlope_Ising.pdf", sep = "/")
 ```
 
 
-# Plot example vector fields
+## Plot example vector fields
 
 
 ```{r compareTwoAnimals, cache=TRUE, echo=FALSE, dependson="sampleFrames"}
@@ -371,7 +318,7 @@ colorWheelGuide = ggplot(nextGrid, aes(X, Y, fill = Heading, alpha = Speed)) + g
 save_plot(paste(projectFolder, "Figure_GettingFluctuations.pdf", sep = "/"), figVFPlot, base_width = 15, base_height = 9)
 ```
 
-# Spatial correlations in fluctuations
+## Spatial correlations in fluctuations
 
 ## Calculate pair-wise correlations and spatial averages
 
@@ -487,9 +434,9 @@ save_plot("rescaledAverageCorrelationProfiles.pdf", rescaledProfilesPlot, base_w
 ```
 
 
-# Correlation strength: decay rate and susceptibility
+## Correlation strength: decay rate and susceptibility
 
-## Susceptibility and Binder from Collective Order
+### Susceptibility and Binder from Collective Order
 
 One way to measure the collective order is to create it from fluctuations in polarization.
 
@@ -576,8 +523,6 @@ save_plot(filename = "susceptibilityResiduals.pdf", susceptibilityLinearFitPlot,
 ```
 
 
-## 
-
 There is a four-panel story here: the poor data collapse, the sublinear susceptibility, the decreasing order with size, and the increased phase transition slope.
 
 ```{r scalingEffectsPlot, cache = T}
@@ -625,7 +570,7 @@ ggplot(binderCumulantDF, aes(energyRatio, binderCumulant)) + geom_point()
 ```
 
 
-# Size effect on statistical properties in Placozoa
+## Size effect on statistical properties in Placozoa
 
 So far we have assumed that the mean field properties within Placozoa, that is the mean speed, fluctuation magnitude, and collective magnitudes have all been relatively the same across animals. This is an assumption that the systems are generic and therefore can be compared across sizes in terms of correlation length. Here we test this assumption using the original, fluctuation, and collective vector fields.
 
@@ -671,7 +616,7 @@ ggplot(allFrameStats, aes(vMag_mean, uMag_mean, color = EquivalentDiameter)) + g
 ```
 
 
-# Effect of mean field on correlation length
+## Effect of mean field on correlation length
 
 We wish to test whether the velocity fluctuation correlation length is at all correlated with the magnitude of the cellular full velocities, fluctuation velocities, or the collective velocities. To do this I determine, for each frame of data, the original, collective, and fluctuation field. Then from these, for each vector, I get the magnitude. Finally, I calculate the mean magnitude of each quantity per frame.
 
@@ -712,12 +657,7 @@ ggplot(nestedModels, aes(vZero_mean, WECorr)) + geom_point()
 ```
 
 
-# FIGURES FOR PAPER
-
-## Figure 1
-
-
-
+## FIGURES FOR PAPER
 
 ## Figure 2
 ```{r figure2}
