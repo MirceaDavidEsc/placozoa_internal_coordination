@@ -22,16 +22,27 @@ Below is the simulation analysis that is used to determine if our results are on
 # Was using SimData_nonorm_fluid before
 # For the Szabo model of the main text, use: SimData_Szabo_new_out
 # For the fixed lattice model of the SI, use: SimData
+fluidSimulation = FALSE
+simDir = ifelse(fluidSimulation, "SimData_Szabo_new_out", "SimData")
 
-simDir = paste(projectFolder, "/Data_Original/PawelSimulations/SimData_Szabo_new_out/", sep = "") 
+simDir = paste(projectFolder, "/Data_Original/PawelSimulations/",simDir,"/", sep = "")
+simSuffix = ifelse(fluidSimulation, "_fluid", "_fixed")
+
+
 source(paste(projectFolder, "/src/ScaleFreeSimAnalysis_functions.R", sep = "/"))
 source(paste(projectFolder, "/src/simulFunctions.R", sep = "/"))
 
-cluster = new_cluster(11)
-cluster_library(cluster, c("tidyverse", "bigh5", "collective", "scalefree", "mover"))
 
+# Set up clusters for parallel computing
+cluster = new_cluster(11)
+cluster_library(cluster, c("tidyverse", "bigh5", "collective", "scalefree", "mover", "modelr", "polynom", "bigsplines", "pracma"))
+cluster_copy(cluster, c("mapCorrelationProfiles", "calcCorrelationFunction", "mapCorrStats"))
+
+
+# For some reason, one file has _NA_, so it is ignored
 metadata = list_sim_data_info(simDir, "*sampledFrames*") %>%
-  mutate(orderFile = str_replace(filename, "sampledFrames", "orderFrames"))
+  mutate(orderFile = str_replace(filename, "sampledFrames", "orderFrames")) %>%
+  filter(!str_detect(filename, "_NA_"))
 
 ```
 
@@ -40,9 +51,15 @@ The data were already normalized previously. For help, see simulFunctions.R on h
 ## Snapshot of simulation, visual
 
 ```{r particeDFs, cache = T}
-criticalityFiles = filter(metadata, Size == 16384 & Noise == 1.45)
+if (fluidSimulation) {
+  criticalNoise = 1.45
+}
+
+criticalNoise = ifelse(fluidSimulation, 1.45, 1.1)
+
+criticalityFiles = filter(metadata, Size == 16384 & Noise == criticalNoise)
 criticalityFrames = read_rds(criticalityFiles$filename[[1]])
-selectedFrame = unique(criticalityFrames$Frame)[[3]]
+selectedFrame = unique(criticalityFrames$Frame) # Arbitrarily selected frame
 
 criticalityFrame = criticalityFrames %>% filter(Frame == selectedFrame) %>% select(-Frame) %>% 
   calculateFluctuationField() %>% 
@@ -51,8 +68,10 @@ criticalityFrame = criticalityFrames %>% filter(Frame == selectedFrame) %>% sele
 
 
 (criticalNoisePlot = plot_simulation_snapshot(criticalityFrame))
-write_rds(x = criticalityFrame, path = paste(projectFolder,"Data_Processed/simulation_sample_frame.rds", sep = "/"))
-save_plot(paste(projectFolder, "/figures/3A_criticalNoise.pdf", sep = ""), criticalNoisePlot)
+
+
+write_rds(x = criticalityFrame, path = paste(projectFolder,"/Data_Processed/criticalSnapshot", simSuffix,".rds", sep = ""))
+save_plot(paste(projectFolder, "/figures/3A_criticalNoise",simSuffix,".pdf", sep = ""), criticalNoisePlot)
 
 ```
 
@@ -61,10 +80,14 @@ save_plot(paste(projectFolder, "/figures/3A_criticalNoise.pdf", sep = ""), criti
 ### PROCESSING: producing fluctuation fields
 
 ```{r produce_fluctuation_fields}
-needsProcessing = metadata %>% filter(!file.exists(processedFile)) %>%
-  filter(!str_detect(filename, "_NA"))
+needsProcessing = metadata %>% filter(!file.exists(processedFile))
 
+# Loop over all files that need processing, create fluctuation fields
 for (i in 1:nrow(needsProcessing)) {
+  # IF no files need processing, just break out of the loop
+  if (nrow(needsProcessing) == 0)
+    break
+  
   dataFile = needsProcessing$filename[[i]]
   print(paste("Processing file",i,"of",nrow(needsProcessing),": ",dataFile))
   processedFile = needsProcessing$processedFile[[i]]
@@ -81,13 +104,18 @@ for (i in 1:nrow(needsProcessing)) {
 }
 ```
 
-### PROCESSING: calculating order values for each frame
+
+### PROCESSING: calculating collective order for each simulation
 
 ```{r calculate_order_values}
-needsProcessing = metadata %>% filter(file.exists(processedFile) & !file.exists(orderFile)) %>%
-  filter(!str_detect(filename, "_NA"))
+needsProcessing = metadata %>% filter(file.exists(processedFile) & !file.exists(orderFile))
 
 for (i in 1:nrow(needsProcessing)) {
+  
+  # IF no files need processing, just break out of the loop
+  if (nrow(needsProcessing) == 0)
+    break
+  
   processedFile = needsProcessing$processedFile[[i]]
   print(paste("Processing file",i,"of",nrow(needsProcessing), processedFile))
   
@@ -107,6 +135,12 @@ for (i in 1:nrow(needsProcessing)) {
 ## Measure order parameters for each frame.
 
 ```{r orderData, cache=T, dependson="processData"}
+if (fluidSimulation) {
+  criticalRange = c(1.4, 1.8)
+} else {
+  criticalRange = c(1.3, 1.6)
+}
+
 
 orderData_complete = bindFilesInList(metadata$orderFile) %>% rename(orderFile = file)
 
@@ -116,132 +150,45 @@ orderDataSummary = orderData_wMeta %>% group_by(Noise, Size) %>% summarise(meanO
 
 (orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + scale_y_continuous("Order") +
     scale_x_continuous(expression(eta)) + 
-  scale_color_gradient(TeX("\\sqrt{N}")) + annotate("rect", ymax = Inf, ymin = -Inf, xmin = 1.4, xmax = 1.6, fill = "red", alpha = 0.5))
-save_plot(paste(paste(projectFolder,"/figures/", sep = ""), "3B_NoiseOrder_fluid.pdf", sep = "/"), orderNoisePlot)
+  scale_color_gradient(TeX("\\sqrt{N}")) + annotate("rect", ymax = Inf, ymin = -Inf, xmin = criticalRange[[1]], xmax = criticalRange[[2]], fill = "red", alpha = 0.5))
 
-write_csv(orderDataSummary, paste(projectFolder, "/Data_Processed/orderData_noise.csv", sep = ""))
+
+save_plot(paste(projectFolder,"/figures/3B_NoiseOrder",simSuffix,".pdf", sep = ""), orderNoisePlot)
+
+write_csv(orderDataSummary, paste(simDir, "/orderData", simSuffix, "csv", sep = ""))
 ```
 
+## PROCESSING: calculate pair-wise correlation and correlation profiles
 
-## Fluctuation fraction
+```{r correlationProfiles, dependson="processData"}
+metadata = metadata %>% mutate(corrFile = str_replace(processedFile , "nestedFrames", "corrProfiles"))
 
-```{r fluctuationEnergy, cache=T, dependson = "processData"}
+needsProcessing = metadata %>% filter(!file.exists(corrFile))
 
-cluster = cluster_copy(cluster, "mapEnergyFraction")
-
-metadata = metadata %>% mutate(energyFile = str_replace(processedFile, "nested", "energy"))
-
-needsEnergy = metadata %>% filter(!file.exists(energyFile))
-
-if (nrow(needsEnergy) != 0) {
-  energyMeasures = needsEnergy %>% partition(cluster) %>% 
-    mutate(energyDF = map(processedFile, mapEnergyFraction)) %>% collect() %>% 
-    select(Noise, Size, Replicate, energyDF) %>% unnest()
+if (nrow(needsProcessing) > 0) {
+  correlationProfiles =  needsProcessing %>%
+    filter(!file.exists(corrFile)) %>% group_by(corrFile) %>%
+    partition(cluster) %>%
+    mutate(corrProfiles = map(processedFile, mapCorrelationProfiles)) %>%
+    collect()
 }
-
-
-energyData_complete = bindFilesInList(metadata$energyFile)
-write_rds(energyMeasures, paste(simDir, "energyData.rds", sep = "/"))
 ```
-
-
-
-```{r fluctuationEnergyAnimal}
-energyOrder = inner_join(read_rds(paste(simDir, "orderData.rds", sep = "/")), read_rds(paste(simDir, "energyData.rds", sep = "/")))
-
-# What is the relationship between intrinsic order and the "noise energy" that we measure in our live animal?
-energyNoiseRelated = energyOrder %>% group_by(Noise, Size) %>% summarise(meanEnergy = mean(energyRatio))
-(noiseenergyRelationPlot = ggplot(energyNoiseRelated, aes(Noise, meanEnergy, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + scale_x_continuous(expression(eta)) + scale_y_continuous(expression(paste(eta,"*",sep=""))) + scale_color_continuous(TeX("\\sqrt{N}")) + guides(color = F))
-(noiseEnergyCriticalityPlot = filter(energyNoiseRelated, Noise >= 0.31 & Noise <= 0.375) %>% ggplot(aes(Noise, meanEnergy, color = Size, group = Size)) + geom_point() + geom_line() + scale_x_continuous(expression(eta), breaks = c(0.33, 0.35, 0.37)) + scale_y_continuous(expression(paste(eta,"*",sep=""))) + scale_color_continuous(TeX("\\sqrt{N}")))
-noiseEffectiveRelation = plot_grid(noiseenergyRelationPlot, noiseEnergyCriticalityPlot, rel_widths = c(0.4,0.6))
-save_plot(paste(simDir, "/noiseEffectiveRelation.pdf", sep = ""), noiseEffectiveRelation, base_height = 6, base_width = 12)
-
-
-criticalRange = energyOrder %>% filter(Noise >= 0.3 & Noise <= 0.4) %>% filter(abs(rotation) <= 0.3)
-write_rds(x = criticalRange, path = paste("D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3C_NoiseOrderRelation_noise_fluid.rds"))
-
-(criticalSlopesPlot = ggplot(criticalRange, aes(energyRatio, polarization, group = Size)) + geom_point(aes(color = Noise), alpha = 0.2) + stat_smooth(aes(linetype = as.factor(Size)), method = "lm", se = F, color = "red") + scale_color_gradient(expression(eta), breaks = c(0.3, 0.35, 0.4)) + scale_x_continuous(expression(paste(eta,"*",sep="")), breaks = c(0,0.5,1), limits = c(0,1)) + scale_y_continuous("Order", breaks = c(0,0.5,1), limits = c(0,1)) + scale_linetype_discrete(TeX("\\sqrt{N}")))
-save_plot(paste(simDir, "criticalSlopes_polarization_norotation.jpg", sep = "/"), criticalSlopesPlot, base_height = 5, base_width = 6)
-
-
-energyModel = function(df) {
-  lm(polarization ~ energyRatio, data = df)
-}
-
-nestedRanges = criticalRange %>% select(Size, Replicate, energyRatio, polarization) %>% group_by(Size, Replicate) %>% nest()
-
-modelSlopes = nestedRanges %>% mutate(linearFit = map(data, energyModel)) %>%
-  mutate(slope = map(linearFit, function(x) {x$coefficients[[2]]})) %>% select(Size, Replicate, slope) %>%
-  mutate(Diam = sqrt(Size)) %>% mutate(logDiam = log(Diam)) %>% unnest() 
-
-linearFit = glm(slope ~ Diam, data = modelSlopes)
-expFit = glm(slope ~ logDiam, data = modelSlopes)
-AICModels = AIC(expFit, linearFit)
-pCorrect = exp((AICModels[[1,2]] - AICModels[[2,2]])/2)
-print(paste("Probability that linear model is right:", pCorrect))
-
-modelSlopes = modelSlopes %>% add_predictions(linearFit, "linear") %>% add_predictions(expFit, "exponential")
-write_rds(modelSlopes, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3D_NoiseSlope_noise_fluid.rds")
-(diameterSlopePlot = ggplot(modelSlopes, aes(Diam, slope)) + geom_point(alpha = 0.5) + xlab(TeX("Size (\\sqrt{N})")) +
-    ylab("S'(r)") + geom_line(aes(Diam, linear), size = 1, alpha = 0.5, color = "red") + 
-    geom_line(aes(Diam, exponential), size = 1))
-save_plot(paste(simDir, "slopeNoiseSize_norotation.jpg", sep = "/"), diameterSlopePlot, base_width = 6, base_height = 5)
-```
-
-
-## Correlations in simulation data
-
-```{r correlationProfiles, cache=T, dependson="processData"}
-mapCorrelationProfiles = function(dataFile) {
-  velocityCorrelations = read_rds(dataFile) %>% sample_n(25)
-  velocityCorrelations = velocityCorrelations %>% mutate(correlationFunction = map2(noBoundary, fluctuationaField, possibly(function(x,y) {calcCorrelationFunction(x,y, 3600)}, NA)))
-  boundCorrelations = velocityCorrelations %>% select(Frame, correlationFunction) %>% filter(!is.na(correlationFunction)) %>% unnest()
-  return(boundCorrelations)
-}
-
-if (!file.exists(paste(simDir, "correlationProfiles.rds", sep = "/"))) {
-  correlationProfiles = metadata %>% mutate(corrProfiles = map(processedFile, mapCorrelationProfiles))
-  corrlationProfiles = select(correlationProfiles, processedFile, Noise, Size, Replicate, corrProfiles) %>% mutate(processedFile = basename(processedFile)) %>%
-  unnest() %>% unnest()
-  write_rds(correlationProfiles, paste(simDir, "correlationProfiles.rds", sep = "/"))  
-} else {
-  correlationProfiles = read_rds(paste(simDir, "correlationProfiles.rds", sep = "/"))
-}
-write_rds(correlationProfiles, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/correlationProfiles_sim_noise_fluid.rds")
-```
-
 
 ## Calculate susceptibility and correlation length
 
 ```{r correlationStats, cache=T, dependson="correlationProfiles"}
-mapCorrStats = function(correlationFunctions) {
-  # Get the profiles before they become negative.
-  velocityProfile = correlationFunctions %>% select(domain, vCorr) 
-  directionProfile = correlationFunctions %>% select(domain, dCorr) 
-  speedProfile = correlationFunctions %>% select(domain, sCorr) 
-  
-  # Get the correltion lengths for each type of correlation.
-  vZero = getFirstZeroCrossing(correlationFunctions$vCorr, distMapping = correlationFunctions$domain)
-  dZero = getFirstZeroCrossing(correlationFunctions$dCorr, distMapping = correlationFunctions$domain)
-  sZero = getFirstZeroCrossing(correlationFunctions$sCorr, distMapping = correlationFunctions$domain)
-  
-  # Susceptibility integrates correlation up to the correlation length, according to Attanasi et al. 2014
-  if (is.na(vZero)) {positiveV = NA} else {positiveV = filter(velocityProfile, domain <= vZero)}
-  if (is.na(dZero)) {positiveD = NA} else {positiveD = filter(directionProfile, domain <= dZero)}
-  if (is.na(sZero)) {positiveS = NA} else {positiveS = filter(speedProfile, domain <= sZero)}
-  
-  # Get the integral of teh positive correlation profile.
-  if (length(positiveV) == 1) {vSuscept = NA} else {vSuscept = calculateSusceptibility(distance = positiveV$domain, correlation = positiveV$vCorr)}
-  if (length(positiveD) == 1) {dSuscept = NA} else {dSuscept = calculateSusceptibility(distance = positiveD$domain, correlation = positiveD$dCorr)}
-  if (length(positiveS) == 1) {sSuscept = NA} else {sSuscept = calculateSusceptibility(distance = positiveS$domain, correlation = positiveS$sCorr)}
+# Read in all files
+corrProfiles_complete = bindFilesInList(metadata$corrFile) %>% inner_join(metadata, by = c("file" = "corrFile"))
 
-  statsDF = data.frame(vZero, dZero, sZero, vSuscept, dSuscept, sSuscept)
-  return(statsDF)
-}
+nestedProfiles = corrProfiles_complete %>% 
+  select(Frame, Noise, Size, Replicate, domain, vCorr, dCorr, sCorr) %>%
+  group_by(Noise, Size, Replicate, Frame) %>% nest(.key = "correlationProfile")
 
-correlationProfiles = read_rds(paste(simDir, "correlationProfiles.rds", sep = "/"))
-nestedProfiles = correlationProfiles %>% select(-processedFile) %>% group_by(Noise, Size, Replicate, Frame) %>% nest(.key = "correlationProfile")
-correlationStats = nestedProfiles %>% partition(Noise) %>% cluster_library("pracma") %>% cluster_copy(mapCorrStats) %>% mutate(corrStats = map(correlationProfile, mapCorrStats)) %>% collect() %>% select(Noise, Size, Replicate, Frame, corrStats) %>% unnest() %>% ungroup() %>% arrange(Noise)
+correlationStats = nestedProfiles %>% partition(cluster) %>% 
+  mutate(corrStats = map(correlationProfile, mapCorrStats)) %>% 
+  collect() %>% 
+  select(Noise, Size, Replicate, Frame, corrStats) %>% 
+  unnest() %>% ungroup()
 
 perFrameAvgCorrStats = group_by(correlationStats, Noise, Size) %>%
   summarise_each(funs(mean, sd), c(vZero:sSuscept)) %>% mutate(nObs = 100)
@@ -260,6 +207,94 @@ write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordinatio
     geom_point(data = criticalData, color = "black") + geom_line(data = criticalData, color = "black") +
     xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(chi[V]," (a.u.)",sep=""))) + scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3))
 write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3E_3F_corrStats_noise_fluid.rds")
+```
+
+
+
+
+## Fluctuation fraction
+
+```{r fluctuationEnergy, cache=T, dependson = "processData"}
+cluster = cluster_copy(cluster, "mapEnergyFraction")
+
+metadata = metadata %>% mutate(energyFile = str_replace(processedFile, "nested", "energy"))
+
+needsEnergy = metadata %>% filter(!file.exists(energyFile))
+
+# Process all the files that need energy, calculate it in a parallelized way across the clusters
+if (nrow(needsEnergy) != 0) {
+  energyMeasures = needsEnergy %>% partition(cluster) %>% 
+    mutate(energyDF = map(processedFile, mapEnergyFraction)) %>% collect() %>% 
+    select(Noise, Size, Replicate, energyDF) %>% unnest()
+}
+
+energyData_complete = bindFilesInList(metadata$energyFile)
+
+energyataFile = ifelse(fluidSimulation, "energyData_fluid.rds", "energyData_fixed.rds")
+
+write_rds(energyMeasures, paste(simDir, energyataFile, sep = "/"))
+```
+
+
+
+```{r fluctuationEnergyAnimal}
+energyOrder = inner_join(read_csv(paste(simDir, orderDataFile, sep = "")), 
+                         read_rds(paste(simDir, energyataFile, sep = "")))
+
+# What is the relationship between intrinsic order and the "noise energy" that we measure in our live animal?
+energyNoiseRelated = energyOrder %>% group_by(Noise, Size) %>% summarise(meanEnergy = mean(energyRatio))
+
+(noiseenergyRelationPlot = ggplot(energyNoiseRelated, aes(Noise, meanEnergy, color = sqrt(Size), group = Size)) + 
+    geom_point() + geom_line() + 
+    scale_x_continuous(expression(eta)) + 
+    scale_y_continuous(expression(paste(eta,"*",sep=""))) + 
+    scale_color_continuous(TeX("\\sqrt{N}")) + guides(color = F))
+
+
+#noiseEffectiveRelation = plot_grid(noiseenergyRelationPlot, noiseEnergyCriticalityPlot, rel_widths = c(0.4,0.6))
+
+
+
+save_plot(paste(simDir, "/noiseEffectiveRelation.pdf", sep = ""), noiseEffectiveRelation, base_height = 6, base_width = 12)
+
+
+criticalRange = energyOrder %>% filter(Noise >= criticalRange[[1]] & Noise <= criticalRange[[2]])
+
+(criticalSlopesPlot = ggplot(criticalRange, aes(energyRatio, meanOrder, group = Size)) + 
+    geom_point(aes(color = Noise), alpha = 0.2) + 
+    stat_smooth(aes(linetype = as.factor(Size)), method = "lm", se = F, color = "red") + 
+    scale_color_gradient(expression(eta), breaks = c(0.3, 0.35, 0.4)) + 
+    scale_x_continuous(expression(paste(eta,"*",sep="")), breaks = c(0,0.5,1), limits = c(0,1)) + 
+    scale_y_continuous("Order", breaks = c(0,0.5,1), limits = c(0,1)) + scale_linetype_discrete(TeX("\\sqrt{N}")))
+
+save_plot(paste(simDir, "criticalSlopes_polarization_norotation.jpg", sep = "/"), criticalSlopesPlot, base_height = 5, base_width = 6)
+
+
+energyRegressionModel = function(df) {
+  lm(polarization ~ energyRatio, data = df)
+}
+
+nestedRanges = criticalRange %>% select(Size, Replicate, energyRatio, polarization) %>% group_by(Size, Replicate) %>% nest()
+
+modelSlopes = nestedRanges %>% mutate(linearFit = map(data, energyRegressionModel)) %>%
+  mutate(slope = map(linearFit, function(x) {x$coefficients[[2]]})) %>% select(Size, Replicate, slope) %>%
+  mutate(Diam = sqrt(Size)) %>% mutate(logDiam = log(Diam)) %>% unnest() 
+
+linearFit = glm(slope ~ Diam, data = modelSlopes)
+expFit = glm(slope ~ logDiam, data = modelSlopes)
+AICModels = AIC(expFit, linearFit)
+pCorrect = exp((AICModels[[1,2]] - AICModels[[2,2]])/2)
+print(paste("Probability that linear model is right:", pCorrect))
+
+modelSlopes = modelSlopes %>% add_predictions(linearFit, "linear") %>% add_predictions(expFit, "exponential")
+
+write_rds(modelSlopes, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3D_NoiseSlope_noise_fluid.rds")
+
+(diameterSlopePlot = ggplot(modelSlopes, aes(Diam, slope)) + geom_point(alpha = 0.5) + 
+    geom_line(aes(Diam, linear), size = 1, alpha = 0.5, color = "red") +
+    xlab(TeX("Size (\\sqrt{N})")) +  ylab("S'(r)") + 
+    geom_line(aes(Diam, exponential), size = 1))
+save_plot(paste(simDir, "slopeNoiseSize_norotation.jpg", sep = "/"), diameterSlopePlot, base_width = 6, base_height = 5)
 ```
 
 ## Full simulation figure
@@ -311,6 +346,8 @@ save_plot(paste(simDir, "binderCumulantPolarization_norotation.jpg", sep = "/"),
 save_plot(paste(simDir, "binderCumulantPolZoomed_norotation.jpg", sep = "/"), binderZoomed, base_height = 5, base_width = 6)
 
 ```
+
+
 
 
 ```{r rescaledProfiles, cache = T, dependson="simulationScaleFree"}
@@ -657,8 +694,6 @@ save_plot("simAnalysis.pdf", simulationAnalysisPlot, base_width = 15, base_heigh
 ## Determine effect of size and noise on fluctuation magnitude.
 
 ```{r fluctMagnitude, cache=T, dependson="correlationProfiles"}
-
-
 if (!file.exists(paste(simDir,"fieldProps.rds",sep="/"))) {
   cl = makeCluster(7)
   registerDoParallel(cl)
@@ -774,66 +809,4 @@ relUWithInset = relUNoisePlot + theme(legend.position = "right") + draw_plot(siz
 
 simulationNewPlot = plot_grid(fluctFieldSim, binderPlot, simulationScaleFree, susceptibilitySizeSimPlot, orderWithInset, relUWithInset, ncol = 2, labels = "AUTO", label_size = 36)
 save_plot("simulationPlot.pdf", simulationNewPlot, base_width = 12, base_height = 14)
-```
-
-
-# WEIRD PAWEL ANALYSIS, do not use.
-
-
-```{r plotGoodData, cache=T}
-avgDataPawel = read_delim("SimulationGood/meanAvgResults.dat", delim = " ", col_names = F)
-colnames(avgDataPawel) = c("Noise", "Size", "Replicate", "Order", "MeanV", "MeanVSquared", "MeanVFourth", "MeanKinetic")
-
-avgDataPawel = avgDataPawel %>% mutate(relU = 1 - MeanV/sqrt(MeanKinetic)) %>% mutate(Binder = 1 - (MeanVFourth/ (3*MeanVSquared^2))) %>%
-  mutate(Susceptibility = MeanVSquared - MeanV^2)
-
-avgDataAggr = avgDataPawel %>% group_by(Noise, Size) %>% summarise_each(Order:Susceptibility, funs = c("mean", "sd"))
-avgDataCount = avgDataPawel %>% group_by(Noise, Size) %>% summarise(count = n())
-avgDataAggr = inner_join(avgDataAggr, avgDataCount)
-
-(orderNoisePlot = ggplot(avgDataAggr, aes(Noise, Order_mean, group = Size, color = sqrt(Size))) + geom_point() + geom_errorbar(aes(ymin = Order_mean - Order_sd/sqrt(count), ymax = Order_mean + Order_sd/sqrt(count))) + geom_line() + 
-    scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.2)) + 
-    scale_y_continuous(name = "Order", breaks = c(0, 0.5, 1.00)) + 
-    scale_color_gradient(name = expression(paste(N^frac(1,2))), breaks = c(25,75,125)) +
-    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.32, xmax = 0.37, fill = "red", alpha = 0.5))
-
-
-(relUNoisePlot = ggplot(avgDataAggr, aes(Noise, relU_mean, group = Size, color = sqrt(Size))) + geom_point() + geom_errorbar(aes(ymin = relU_mean - relU_sd/sqrt(count), ymax = relU_mean + relU_sd/sqrt(count))) + geom_line() + 
-    scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.2)) + 
-    scale_y_continuous(name = expression(omega), breaks = c(0, 0.5, 1.00)) + 
-    scale_color_gradient(name = expression(paste(N^frac(1,2))), breaks = c(25,75,125)) +
-    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.32, xmax = 0.37, fill = "red", alpha = 0.5))
-
-(binderPlot = avgDataAggr[-25,] %>% ggplot(aes(Noise, Binder_mean, group = Size, color = sqrt(Size))) + geom_point() + 
-  geom_line() + 
-    scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.1)) + 
-    scale_y_continuous(name = expression(U)) + 
-    scale_color_gradient(name = expression(paste(N^frac(1,2))), breaks = c(25,75,125)) + 
-    annotate("rect", ymax = Inf, ymin = -Inf, xmin = 0.32, xmax = 0.37, fill = "red", alpha = 0.5))
-
-
-ggplot(avgDataAggr, aes(Noise, Susceptibility_mean, group = Size, color = sqrt(Size))) + geom_point() + geom_line() + scale_x_continuous(name = expression(eta), breaks = seq(from = 0.1, to = 0.8, by = 0.1)) + scale_y_continuous(name = expression(chi), breaks = c(0, 0.5, 1.00)) + scale_color_gradient(name = expression(paste(N^frac(1,2))))
-
-
-(sizeRelUPlot = filter(avgDataAggr, Noise %in% c(0.1, 0.35, 0.6))  %>% ggplot(aes(sqrt(Size), relU_mean, group = Noise, color = as.factor(Noise))) + geom_point() + geom_errorbar(aes(ymax = relU_mean + relU_sd/sqrt(count), ymin = relU_mean - relU_sd/sqrt(count)), alpha = 0.3) + geom_line() + theme(legend.position = "right") + 
-    scale_y_continuous(name = expression(omega), limits = c(0,1), breaks = c(0, 0.5, 1)) + 
-    scale_x_continuous(name = expression(paste("Size (",N^frac(1,2),")"))) +
-    scale_color_manual(name = expression(eta), values = c("black", "red", "grey")))
-
-(sizeOrderPlot = filter(avgDataAggr, Noise %in% c(0.1, 0.35, 0.6))  %>% ggplot(aes(sqrt(Size), Order_mean, group = Noise, color = as.factor(Noise))) + geom_point() + geom_errorbar(aes(ymax = Order_mean + Order_sd/sqrt(count), ymin = Order_mean - Order_sd/sqrt(count)), alpha = 0.3) + geom_line() + theme(legend.position = "right") + 
-    scale_y_continuous(name = "Order", limits = c(0,1), breaks = c(0, 0.5, 1)) + 
-    scale_x_continuous(name = expression(paste(" Size (",N^frac(1,2),")"))) +
-    scale_color_manual(name = expression(eta), values = c("black", "red", "grey")))
-
-
-binderPlot
-sizeRelUPlot
-sizeOrderPlot
-# Insets
-orderNoisePlot
-relUNoisePlot
-
-sizeFluctEffect = avgDataAggr %>% select(Noise, Size, relU_mean) %>% spread(key = Size, value = relU_mean) %>%
-  mutate(growth = `16384` / `512`)
-ggplot(sizeFluctEffect, aes(Noise, growth)) + geom_point() + geom_line()
 ```
