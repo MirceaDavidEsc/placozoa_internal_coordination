@@ -22,11 +22,17 @@ Below is the simulation analysis that is used to determine if our results are on
 # Was using SimData_nonorm_fluid before
 # For the Szabo model of the main text, use: SimData_Szabo_new_out
 # For the fixed lattice model of the SI, use: SimData
-fluidSimulation = FALSE
-simDir = ifelse(fluidSimulation, "SimData_Szabo_new_out", "SimData")
 
+simulationTypes = data.frame(simType = c("_fluid", "_fixed", "_fluid_fast"), folderName = c("Simdata_Szabo_new_out", "SimData", "SimData_Szabo_fast_out"),
+                             criticalMin = c(1.4, 1.3, 1.4), criticalMax = c(1.8, 1.6, 1.8), criticalLevel = c(1.6, 1.5, 1.6))
+
+
+simType = "_fluid_fast"
+simTypeIndex = simulationTypes$simType == simType
+
+simDir = simulationTypes$folderName[simTypeIndex]
 simDir = paste(projectFolder, "/Data_Original/PawelSimulations/",simDir,"/", sep = "")
-simSuffix = ifelse(fluidSimulation, "_fluid", "_fixed")
+simSuffix = simType
 
 
 source(paste(projectFolder, "/src/ScaleFreeSimAnalysis_functions.R", sep = "/"))
@@ -43,35 +49,6 @@ cluster_copy(cluster, c("mapCorrelationProfiles", "calcCorrelationFunction", "ma
 metadata = list_sim_data_info(simDir, "*sampledFrames*") %>%
   mutate(orderFile = str_replace(filename, "sampledFrames", "orderFrames")) %>%
   filter(!str_detect(filename, "_NA_"))
-
-```
-
-The data were already normalized previously. For help, see simulFunctions.R on how this was done by Pawel.
-
-## Snapshot of simulation, visual
-
-```{r particeDFs, cache = T}
-if (fluidSimulation) {
-  criticalNoise = 1.45
-}
-
-criticalNoise = ifelse(fluidSimulation, 1.45, 1.1)
-
-criticalityFiles = filter(metadata, Size == 16384 & Noise == criticalNoise)
-criticalityFrames = read_rds(criticalityFiles$filename[[1]])
-selectedFrame = unique(criticalityFrames$Frame) # Arbitrarily selected frame
-
-criticalityFrame = criticalityFrames %>% filter(Frame == selectedFrame) %>% select(-Frame) %>% 
-  calculateFluctuationField() %>% 
-  mutate(angle = atan2(x = fluctX, y = fluctY), speed = sqrt(fluctX^2 + fluctY^2))
-
-
-
-(criticalNoisePlot = plot_simulation_snapshot(criticalityFrame))
-
-
-write_rds(x = criticalityFrame, path = paste(projectFolder,"/Data_Processed/criticalSnapshot", simSuffix,".rds", sep = ""))
-save_plot(paste(projectFolder, "/figures/3A_criticalNoise",simSuffix,".pdf", sep = ""), criticalNoisePlot)
 
 ```
 
@@ -135,28 +112,45 @@ for (i in 1:nrow(needsProcessing)) {
 ## Measure order parameters for each frame.
 
 ```{r orderData, cache=T, dependson="processData"}
-if (fluidSimulation) {
-  criticalRange = c(1.4, 1.8)
-} else {
-  criticalRange = c(1.3, 1.6)
-}
-
-
 orderData_complete = bindFilesInList(metadata$orderFile) %>% rename(orderFile = file)
 
 orderData_wMeta = inner_join(orderData_complete, metadata)
 
 orderDataSummary = orderData_wMeta %>% group_by(Noise, Size) %>% summarise(meanOrder = mean(collectiveOrder), sdOrder = sd(collectiveOrder), count = n())
 
+criticalRange = c(simulationTypes$criticalMin[simTypeIndex],
+                  simulationTypes$criticalMax[simTypeIndex])
+
 (orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + scale_y_continuous("Order") +
     scale_x_continuous(expression(eta)) + 
-  scale_color_gradient(TeX("\\sqrt{N}")) + annotate("rect", ymax = Inf, ymin = -Inf, xmin = criticalRange[[1]], xmax = criticalRange[[2]], fill = "red", alpha = 0.5))
+    scale_color_gradient(TeX("\\sqrt{N}")) + 
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = criticalRange[[1]], xmax = criticalRange[[2]], fill = "red", alpha = 0.5))
 
 
 save_plot(paste(projectFolder,"/figures/3B_NoiseOrder",simSuffix,".pdf", sep = ""), orderNoisePlot)
-
-write_csv(orderDataSummary, paste(simDir, "/orderData", simSuffix, "csv", sep = ""))
 ```
+
+## Snapshot of simulation, visual
+
+```{r particeDFs, cache = T}
+criticalityFiles = filter(metadata, Size == 16384 & Noise == simulationTypes$criticalLevel[simTypeIndex])
+criticalityFrames = read_rds(criticalityFiles$filename[[1]])
+selectedFrame = unique(criticalityFrames$Frame[[1]]) # Arbitrarily selected frame
+
+criticalityFrame = criticalityFrames %>% filter(Frame == selectedFrame) %>% select(-Frame) %>% 
+  calculateFluctuationField() %>% 
+  mutate(angle = atan2(x = fluctX, y = fluctY), speed = sqrt(fluctX^2 + fluctY^2))
+
+
+
+(criticalNoisePlot = plot_simulation_snapshot(criticalityFrame))
+
+
+write_rds(x = criticalityFrame, path = paste(projectFolder,"/Data_Processed/criticalSnapshot", simSuffix,".rds", sep = ""))
+save_plot(paste(projectFolder, "/figures/3A_criticalNoise",simSuffix,".pdf", sep = ""), criticalNoisePlot)
+```
+
+
 
 ## PROCESSING: calculate pair-wise correlation and correlation profiles
 
@@ -178,38 +172,82 @@ if (nrow(needsProcessing) > 0) {
 
 ```{r correlationStats, cache=T, dependson="correlationProfiles"}
 # Read in all files
+
 corrProfiles_complete = bindFilesInList(metadata$corrFile) %>% inner_join(metadata, by = c("file" = "corrFile"))
 
-nestedProfiles = corrProfiles_complete %>% 
+corrStatsFile = paste(projectFolder, "correlationStats", simSuffix, ".rds", sep = "")
+if (!file.exists(corrStatsFile)) {
+  nestedProfiles = corrProfiles_complete %>% 
   select(Frame, Noise, Size, Replicate, domain, vCorr, dCorr, sCorr) %>%
   group_by(Noise, Size, Replicate, Frame) %>% nest(.key = "correlationProfile")
+  
+  correlationStats = nestedProfiles %>% partition(cluster) %>% 
+    mutate(corrStats = map(correlationProfile, mapCorrStats)) %>% 
+    collect() %>% 
+    select(Noise, Size, Replicate, Frame, corrStats) %>% 
+    unnest() %>% ungroup()  
+  
+  write_rds(correlationStats, corrStatsFile)
+}
 
-correlationStats = nestedProfiles %>% partition(cluster) %>% 
-  mutate(corrStats = map(correlationProfile, mapCorrStats)) %>% 
-  collect() %>% 
-  select(Noise, Size, Replicate, Frame, corrStats) %>% 
-  unnest() %>% ungroup()
-
-perFrameAvgCorrStats = group_by(correlationStats, Noise, Size) %>%
-  summarise_each(funs(mean, sd), c(vZero:sSuscept)) %>% mutate(nObs = 100)
-write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/correlationStats_sim_noise_fluid.rds")
-
-criticalData = filter(perFrameAvgCorrStats, Noise == 0.35)
-(vZeroPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vZero_mean, color = Noise, group = Noise)) + geom_point(size=2) + geom_line() +
-    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[V]," (a.u.)",sep=""))) + scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3) + geom_point(data = criticalData, color = "black") + geom_line(data = criticalData, color = "black"))
-write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3E_3F_corrStats_noise_fluid.rds")
-
-(sZeroPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vZero_mean, color = Noise, group = Noise)) + geom_point(size=2) + 
-    geom_errorbar(aes(ymax=sZero_mean + sZero_sd / sqrt(nObs), ymin=sZero_mean - sZero_sd / sqrt(nObs))) +
-    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[s]," (a.u.)",sep=""))) + scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3))
-
-(vSusceptPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vSuscept_mean, color = Noise, group = Noise)) + geom_point(size=2) + geom_line() +
-    geom_point(data = criticalData, color = "black") + geom_line(data = criticalData, color = "black") +
-    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(chi[V]," (a.u.)",sep=""))) + scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3))
-write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3E_3F_corrStats_noise_fluid.rds")
+correlationStats = read_rds(corrStatsFile)
 ```
 
+# Plot out the correlation stats
 
+
+```{r correlationStatsSummary}
+perFrameAvgCorrStats = correlationStats %>% 
+  group_by(Noise, Size) %>%
+  summarise(across(vZero:sSuscept, list(mean, sd)))
+
+# Rename columns more intuitively than what you get from the across() function
+colnames(perFrameAvgCorrStats) = str_replace(colnames(perFrameAvgCorrStats), "_1", "_mean")
+colnames(perFrameAvgCorrStats) = str_replace(colnames(perFrameAvgCorrStats), "_2", "_sd")
+
+# Used to plot a separate color for critical noise data
+criticalData = filter(perFrameAvgCorrStats, Noise == simulationTypes$criticalLevel[simTypeIndex])
+
+perFrameAvgCorrStats = perFrameAvgCorrStats %>% mutate(sqrtSize = sqrt(Size))
+
+plot_scaling_property = function(pperFrameAvgCorrStats, sizeCol, propertyCol) {
+  (vZeroPlot = ggplot(perFrameAvgCorrStats, aes_string(sqrtSize, propertyCol, color = Noise, group = Noise)) + 
+    geom_point(size=2) + geom_line() +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[V]," (a.u.)",sep=""))) + 
+    scale_color_gradient2(expression(k), high = "red", mid = "yellow", low = "blue", midpoint = 0.3) + 
+    geom_point(data = criticalData, color = "black") +
+    geom_line(data = criticalData, color = "black"))  
+}
+
+
+(vZeroPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vZero_mean, color = Noise, group = Noise)) + 
+    geom_point(size=2) + geom_line() +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[V]," (a.u.)",sep=""))) + 
+    scale_color_gradient2(expression(k), high = "red", mid = "yellow", low = "blue", midpoint = 0.3) + 
+    geom_point(data = criticalData, color = "black") +
+    geom_line(data = criticalData, color = "black"))
+save_plot(paste(projectFolder, "/figures/correlationLengths_velocity",simSuffix,".pdf", sep = ""), vZeroPlot)
+
+
+(sZeroPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), sZero_mean, color = Noise, group = Noise)) + 
+    geom_point(size=2) + geom_line() +
+    xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(paste(phi[s]," (a.u.)",sep=""))) + 
+    scale_color_gradient2(expression(k), high = "red", mid = "yellow", low = "blue", midpoint = 0.3) + 
+    geom_point(data = criticalData, color = "black") +
+    geom_line(data = criticalData, color = "black"))
+save_plot(paste(projectFolder, "/figures/correlationLengths_speed",simSuffix,".pdf", sep = ""), sZeroPlot)
+
+
+
+(vSusceptPlot = ggplot(perFrameAvgCorrStats, aes(sqrt(Size), vSuscept_mean, color = Noise, group = Noise)) + 
+    geom_point(size=2) + geom_line() +
+    geom_point(data = criticalData, color = "black") + 
+    geom_line(data = criticalData, color = "black") +
+    xlab(TeX("Size (\\sqrt{N})")) + 
+    ylab(expression(paste(chi[V]," (a.u.)",sep=""))) + 
+    scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3))
+write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3E_3F_corrStats_noise_fluid.rds")
+```
 
 
 ## Fluctuation fraction
