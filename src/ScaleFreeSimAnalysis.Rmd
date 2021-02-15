@@ -23,11 +23,14 @@ Below is the simulation analysis that is used to determine if our results are on
 # For the Szabo model of the main text, use: SimData_Szabo_new_out
 # For the fixed lattice model of the SI, use: SimData
 
-simulationTypes = data.frame(simType = c("_fluid", "_fixed", "_fluid_fast"), folderName = c("Simdata_Szabo_new_out", "SimData", "SimData_Szabo_fast_out"),
-                             criticalMin = c(1.4, 1.3, 1.4), criticalMax = c(1.8, 1.6, 1.8), criticalLevel = c(1.6, 1.5, 1.6))
+simulationTypes = data.frame(simType = c("_fluid", "_fixed", "_fluid_fast", "_nonormspring"),
+                             folderName = c("SimData", "SimData_Szabo_fast_out", "SimData_Szabo_fast_out", "SimDataPlacozoa_nonnorm_spring"),
+                             criticalMin = c(1.4, 1.3, 1.4, 3.2), criticalMax = c(1.8, 1.6, 1.8, 4.0), 
+                             criticalLevel = c(1.4, 1.5, 1.55, 3.9),
+                             criticalityframe = c(-1, -1, -1, 7889))
 
 
-simType = "_fluid_fast"
+simType = "_nonormspring"
 simTypeIndex = simulationTypes$simType == simType
 
 simDir = simulationTypes$folderName[simTypeIndex]
@@ -56,7 +59,10 @@ metadata = list_sim_data_info(simDir, "*sampledFrames*") %>%
 
 ### PROCESSING: producing fluctuation fields
 
+This chunk is run to calculate the velocity fluctuations from the raw velocities. The velocity fluctuations are used to calculate correlations, the proxy we use for information propagation.
+
 ```{r produce_fluctuation_fields}
+
 needsProcessing = metadata %>% filter(!file.exists(processedFile))
 
 # Loop over all files that need processing, create fluctuation fields
@@ -84,6 +90,8 @@ for (i in 1:nrow(needsProcessing)) {
 
 ### PROCESSING: calculating collective order for each simulation
 
+Here we calculate the collective order as was specified by Couzin, Vicsek, and Cavagna in different papers.
+
 ```{r calculate_order_values}
 needsProcessing = metadata %>% filter(file.exists(processedFile) & !file.exists(orderFile))
 
@@ -96,63 +104,121 @@ for (i in 1:nrow(needsProcessing)) {
   processedFile = needsProcessing$processedFile[[i]]
   print(paste("Processing file",i,"of",nrow(needsProcessing), processedFile))
   
-  orderMeasures = read_rds(processedFile) %>%
-    mutate(rotation = map(bulkData, measureRotation),
-           polarization = map(bulkData, measurePolarization),
-           dilatation = map(bulkData, measureDilatation)) %>%
-    select(-data, -bulkData, -fluctuationaField) %>%
-    unnest(c(rotation, polarization, dilatation)) %>%
-    mutate(collectiveOrder = sqrt(rotation^2 + polarization^2 + dilatation^2))
+  orderMeasures = read_rds(processedFile)
+  if (any(colnames(orderMeasures) == "noBoundary")) {
+    orderMeasures = rename(orderMeasures, bulkData = noBoundary, data = velocityField)
+  }
+  
+  orderMeasures = orderMeasures %>% mutate(rotation = map(bulkData, measureRotation),
+         polarization = map(bulkData, measurePolarization),
+         dilatation = map(bulkData, measureDilatation)) %>%
+  select(-data, -bulkData, -fluctuationaField) %>%
+  unnest(c(rotation, polarization, dilatation)) %>%
+  mutate(collectiveOrder = sqrt(rotation^2 + polarization^2 + dilatation^2))
   
   write_rds(orderMeasures, needsProcessing$orderFile[[i]])
 }
 ```
 
 
-## Measure order parameters for each frame.
+## PLOT: relation between the control paramenter (spring strength, noise, etc.) and collective order
 
-```{r orderData, cache=T, dependson="processData"}
+This chunk creates a plot that shows the phase transition from disorder to order by plotting the collective order value against the control parameter that we tune. The phase transition is highlighted in red (the range is hard-coded).
+
+```{r orderNoisePlot, cache=T, dependson="processData"}
 orderData_complete = bindFilesInList(metadata$orderFile) %>% rename(orderFile = file)
 
 orderData_wMeta = inner_join(orderData_complete, metadata)
+
+if (any(colnames(orderData_wMeta) == "Order")) {
+  orderData_wMeta = rename(orderData_wMeta, collectiveOrder = Order)
+}
 
 orderDataSummary = orderData_wMeta %>% group_by(Noise, Size) %>% summarise(meanOrder = mean(collectiveOrder), sdOrder = sd(collectiveOrder), count = n())
 
 criticalRange = c(simulationTypes$criticalMin[simTypeIndex],
                   simulationTypes$criticalMax[simTypeIndex])
 
-(orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + geom_point() + geom_line() + scale_y_continuous("Order") +
-    scale_x_continuous(expression(eta)) + 
+(orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + 
+    geom_point() + geom_line() + scale_y_continuous("Order") +
+    scale_x_continuous("Spring strength (k)") + 
     scale_color_gradient(TeX("\\sqrt{N}")) + 
-    annotate("rect", ymax = Inf, ymin = -Inf, xmin = criticalRange[[1]], xmax = criticalRange[[2]], fill = "red", alpha = 0.5))
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = criticalRange[[1]], xmax = criticalRange[[2]], fill = "red", alpha = 0.5) +
+    theme_classic())
+save_plot(paste(projectFolder,"/figures/NoiseOrder",simSuffix,".pdf", sep = ""), orderNoisePlot)
 
+write_csv(orderDataSummary, paste(projectFolder, "/figures_data/NoiseOrder", simSuffix, ".csv", sep = ""))
 
-save_plot(paste(projectFolder,"/figures/3B_NoiseOrder",simSuffix,".pdf", sep = ""), orderNoisePlot)
 ```
 
-## Snapshot of simulation, visual
+## Plot: susceptibility from order
+
+
+```{r susceptibility}
+# Perform calculation for all order data.
+susceptibilityDatasummary = orderData_wMeta %>% group_by(Size, Noise) %>%
+  # filter(abs(rotation) <= 0.4) %>%
+  summarise(meanOrder = mean(polarization), meanSquaredOrder = mean(polarization^2)) %>% 
+  mutate(susceptibility = Size * (meanSquaredOrder - meanOrder^2))
+
+(susceptOrderPlot = ggplot(susceptibilityDatasummary, aes(Noise, susceptibility, group = sqrt(Size), color = sqrt(Size))) + 
+    geom_point() + geom_line() + 
+    scale_y_continuous(expression(chi[o])) + scale_x_continuous("Spring strength (k)") + 
+    scale_color_gradient(TeX("\\sqrt{N}")) +
+    annotate("rect", ymax = Inf, ymin = -Inf, xmin = criticalRange[[1]], xmax = criticalRange[[2]], fill = "red", alpha = 0.5) +
+    theme_classic()
+    )
+save_plot(paste(projectFolder,"/figures/NoiseSuceptibility",simSuffix,".pdf", sep = ""), susceptOrderPlot)
+write_csv(susceptibilityDatasummary, paste(projectFolder, "/figures_data/NoiseSuscept", simSuffix, ".csv", sep = ""))
+```
+
+
+## Simulation snapshot
+
+This figure shows a snapshot of the simulation as the particles are moving through space. It is taken at the critical control parameter setting, showing large correlated domains. 
 
 ```{r particeDFs, cache = T}
 criticalityFiles = filter(metadata, Size == 16384 & Noise == simulationTypes$criticalLevel[simTypeIndex])
 criticalityFrames = read_rds(criticalityFiles$filename[[1]])
-selectedFrame = unique(criticalityFrames$Frame[[1]]) # Arbitrarily selected frame
+
+selectedFrame = criticalityFrames$Frame[[1]] # Arbitrarily selected frame
 
 criticalityFrame = criticalityFrames %>% filter(Frame == selectedFrame) %>% select(-Frame) %>% 
-  calculateFluctuationField() %>% 
-  mutate(angle = atan2(x = fluctX, y = fluctY), speed = sqrt(fluctX^2 + fluctY^2))
+  # calculateFluctuationField() %>% 
+  # mutate(angle = atan2(x = fluctX, y = fluctY), speed = sqrt(fluctX^2 + fluctY^2)) %>%
+  mutate(angle = atan2(x = vX, y = vY), speed = sqrt(vX^2 + vY^2)) %>%
+  mutate(X = X - mean(X), Y = Y - mean(Y))
 
+(criticalNoisePlot = plot_simulation_snapshot(criticalityFrame, arrows = T, arrows_round = 25, arrowMultiple = 50) +
+    theme(legend.key.height = unit(1, "cm"), legend.text = element_text(size = 30), legend.title = element_text(size = 30)))
 
-
-(criticalNoisePlot = plot_simulation_snapshot(criticalityFrame))
-
-
-write_rds(x = criticalityFrame, path = paste(projectFolder,"/Data_Processed/criticalSnapshot", simSuffix,".rds", sep = ""))
+write_csv(x = criticalityFrame, path = paste(projectFolder,"/figures_data/3A_criticalNoise", simSuffix,".csv", sep = ""))
 save_plot(paste(projectFolder, "/figures/3A_criticalNoise",simSuffix,".pdf", sep = ""), criticalNoisePlot)
 ```
 
 
+## Complete figure 1:
+
+```{r complete_sim_figure}
+schemaPlot = readPNG(paste(projectFolder, "/figures/model_scheme.png", sep = ""))
+schemaPlotRaster = rasterGrob(schemaPlot)
+(schemaPlotImg = ggplot(orderDataSummary, aes()) + annotation_custom(schemaPlotRaster) + coord_fixed(ratio=1) + theme_classic() +
+  theme(axis.line = element_blank()))
+
+top2 = plot_grid(schemaPlotImg, criticalNoisePlot, labels = "AUTO")
+(insetGraph = increase_text_size(orderNoisePlot) + draw_plot(increase_text_size(susceptOrderPlot) + guides(color = F), 5, 0.2, 4, 0.7))
+
+(simulationOrderPlot = plot_grid(top2, insetGraph, nrow = 2, labels = c("", "C")))
+save_plot(paste(projectFolder, "/figures/simulationOrderPlot",simSuffix,".pdf", sep = ""), simulationOrderPlot, base_width = 8, base_height = 6)
+
+file.copy(paste(projectFolder, "/figures/simulationOrderPlot",simSuffix,".pdf", sep = ""), paste(projectFolder, "/figures/Figure.2.pdf", sep = ""), overwrite = T)
+
+```
+
 
 ## PROCESSING: calculate pair-wise correlation and correlation profiles
+
+This chunk calculates the pair-wise correlations between particles at various distances and aggregates the data into correlation profiles for each distance range.
 
 ```{r correlationProfiles, dependson="processData"}
 metadata = metadata %>% mutate(corrFile = str_replace(processedFile , "nestedFrames", "corrProfiles"))
@@ -168,19 +234,35 @@ if (nrow(needsProcessing) > 0) {
 }
 ```
 
+
 ## Calculate susceptibility and correlation length
+
+
+# Calculate correlations
 
 ```{r correlationStats, cache=T, dependson="correlationProfiles"}
 # Read in all files
-
 corrProfiles_complete = bindFilesInList(metadata$corrFile) %>% inner_join(metadata, by = c("file" = "corrFile"))
 
-corrStatsFile = paste(projectFolder, "correlationStats", simSuffix, ".rds", sep = "")
+metadata = metadata %>% mutate(statsFile = str_replace(corrFile, "corrProfiles", "corrStats"))
+
+needsProcessing = filter(metadata, !file.exists(statsFile))
+
+corrStatsFile = paste(projectFolder, "/correlationStats", simSuffix, ".rds", sep = "")
 if (!file.exists(corrStatsFile)) {
+  # Nest the correlation profiles for each replicate/condition.
   nestedProfiles = corrProfiles_complete %>% 
-  select(Frame, Noise, Size, Replicate, domain, vCorr, dCorr, sCorr) %>%
-  group_by(Noise, Size, Replicate, Frame) %>% nest(.key = "correlationProfile")
+    select(Frame, Noise, Size, Replicate, domain, vCorr, dCorr, sCorr) %>%
+    group_by(Noise, Size, Replicate, Frame) %>% nest(.key = "correlationProfile")
   
+  
+  correlationStats =  needsProcessing %>% group_by(statsFile) %>%
+    partition(cluster) %>%
+    mutate(corrProfiles = map(corrFile, mapCorrStats)) %>%
+    collect()
+  
+  
+  # Calculate the stats (correlation length, susceptibility) from each correlation profile
   correlationStats = nestedProfiles %>% partition(cluster) %>% 
     mutate(corrStats = map(correlationProfile, mapCorrStats)) %>% 
     collect() %>% 
@@ -194,7 +276,6 @@ correlationStats = read_rds(corrStatsFile)
 ```
 
 # Plot out the correlation stats
-
 
 ```{r correlationStatsSummary}
 perFrameAvgCorrStats = correlationStats %>% 
@@ -246,13 +327,12 @@ save_plot(paste(projectFolder, "/figures/correlationLengths_speed",simSuffix,".p
     xlab(TeX("Size (\\sqrt{N})")) + 
     ylab(expression(paste(chi[V]," (a.u.)",sep=""))) + 
     scale_color_gradient2(expression(eta), high = "red", mid = "yellow", low = "blue", midpoint = 0.3))
-write_rds(perFrameAvgCorrStats, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3E_3F_corrStats_noise_fluid.rds")
 ```
 
 
 ## Fluctuation fraction
 
-```{r fluctuationEnergy, cache=T, dependson = "processData"}
+```{r calculate_fluctuation_energy, cache=T, dependson = "processData"}
 cluster = cluster_copy(cluster, "mapEnergyFraction")
 
 metadata = metadata %>% mutate(energyFile = str_replace(processedFile, "nested", "energy"))
@@ -267,38 +347,36 @@ if (nrow(needsEnergy) != 0) {
 }
 
 energyData_complete = bindFilesInList(metadata$energyFile)
-
-energyataFile = ifelse(fluidSimulation, "energyData_fluid.rds", "energyData_fixed.rds")
-
-write_rds(energyMeasures, paste(simDir, energyataFile, sep = "/"))
 ```
 
 
+# Plot energy vs order
 
-```{r fluctuationEnergyAnimal}
-energyOrder = inner_join(read_csv(paste(simDir, orderDataFile, sep = "")), 
-                         read_rds(paste(simDir, energyataFile, sep = "")))
+
+
+
+
+```{r energy_vs_order}
+energyData_wOrder = energyData_complete %>% 
+  inner_join(metadata, by = c("file" = "energyFile")) %>%
+  inner_join(orderData_wMeta, by = c("Frame", "Noise", "Size", "Replicate")) %>%
+  select(-c("orderFile.y", "filename.y", "processedFile.y", "orderFile.x", "corrFile", "filename.x"))
 
 # What is the relationship between intrinsic order and the "noise energy" that we measure in our live animal?
 energyNoiseRelated = energyOrder %>% group_by(Noise, Size) %>% summarise(meanEnergy = mean(energyRatio))
 
-(noiseenergyRelationPlot = ggplot(energyNoiseRelated, aes(Noise, meanEnergy, color = sqrt(Size), group = Size)) + 
+(noiseenergyRelationPlot = ggplot(energyData_wOrder, aes(Noise, energyRatio, color = sqrt(Size), group = Size)) + 
     geom_point() + geom_line() + 
     scale_x_continuous(expression(eta)) + 
     scale_y_continuous(expression(paste(eta,"*",sep=""))) + 
     scale_color_continuous(TeX("\\sqrt{N}")) + guides(color = F))
 
-
-#noiseEffectiveRelation = plot_grid(noiseenergyRelationPlot, noiseEnergyCriticalityPlot, rel_widths = c(0.4,0.6))
-
+save_plot(paste(simDir, "/noiseEffectiveRelation_", simSuffix,".jpg", sep = ""), noiseenergyRelationPlot, base_height = 6, base_width = 12)
 
 
-save_plot(paste(simDir, "/noiseEffectiveRelation.pdf", sep = ""), noiseEffectiveRelation, base_height = 6, base_width = 12)
+criticalRange = energyData_wOrder %>% filter(Noise >= criticalRange[[1]] & Noise <= criticalRange[[2]])
 
-
-criticalRange = energyOrder %>% filter(Noise >= criticalRange[[1]] & Noise <= criticalRange[[2]])
-
-(criticalSlopesPlot = ggplot(criticalRange, aes(energyRatio, meanOrder, group = Size)) + 
+(criticalSlopesPlot = ggplot(criticalRange, aes(energyRatio, collectiveOrder, group = Size)) + 
     geom_point(aes(color = Noise), alpha = 0.2) + 
     stat_smooth(aes(linetype = as.factor(Size)), method = "lm", se = F, color = "red") + 
     scale_color_gradient(expression(eta), breaks = c(0.3, 0.35, 0.4)) + 
@@ -326,13 +404,14 @@ print(paste("Probability that linear model is right:", pCorrect))
 
 modelSlopes = modelSlopes %>% add_predictions(linearFit, "linear") %>% add_predictions(expFit, "exponential")
 
-write_rds(modelSlopes, "D:/Mircea/Projects/RESEARCH/InternalCoordination/FigureData/3D_NoiseSlope_noise_fluid.rds")
+write_rds(modelSlopes, paste(simDir, "/energy_slopes_",simSuffix,".rds", sep = ""))
 
 (diameterSlopePlot = ggplot(modelSlopes, aes(Diam, slope)) + geom_point(alpha = 0.5) + 
     geom_line(aes(Diam, linear), size = 1, alpha = 0.5, color = "red") +
     xlab(TeX("Size (\\sqrt{N})")) +  ylab("S'(r)") + 
     geom_line(aes(Diam, exponential), size = 1))
-save_plot(paste(simDir, "slopeNoiseSize_norotation.jpg", sep = "/"), diameterSlopePlot, base_width = 6, base_height = 5)
+
+save_plot(paste(simDir, "/slopeNoiseSize_norotation_",simSuffix,".jpg", sep = ""), diameterSlopePlot, base_width = 6, base_height = 5)
 ```
 
 ## Full simulation figure
@@ -356,23 +435,9 @@ simPlot = plot_grid(criticalSlopesPlot + theme(legend.position = c(0.1, 0.5), ax
 save_plot(plot = simPlot, paste(simDir, "simPlot.pdf", sep = "/"), base_width = 14, base_height = 12)
 ```
 
-
-
-
 ## Alternative susceptibility calculation
 
 ```{r susceptBinderFromOrder, cache=T, dependson="orderMeasures"}
-# Perform calculation for all order data.
-orderData = read_rds(paste(simDir, "orderData_sim_noise_fluid.rds", sep = "/"))
-orderMeasures = mutate(orderData, orderToCalc = polarization) %>% filter(abs(rotation) <= 0.4)
-orderSuscept = select(orderMeasures, -processedFile) %>% mutate(orderSquared = orderToCalc^2) %>% group_by(Size, Noise) %>% summarise(meanOrder = mean(orderToCalc), meanSquaredOrder = mean(orderSquared)) %>% mutate(susceptibility = Size * (meanSquaredOrder - meanOrder^2))
-
-write_rds(x = orderSuscept, path = paste(projectFolder,"simOrderSusceptibility_noise.rds", sep = "/"))
-(susceptSizePlot = filter(orderSuscept,Noise!=0.34) %>% ggplot(aes(Size, susceptibility, color = as.factor(2*(Noise >= 0.36) + (Noise == 0.35)), group = Noise)) + geom_point() + geom_line() + scale_color_manual(values = c("red", "black", "blue"), labels = c(TeX("\\eta > \\eta_C")), TeX("\\eta = \\eta_C"), expression("\\eta < \\eta_C")) + xlab(TeX("Size (\\sqrt{N})")) + ylab(expression(eta[o])))
-
-(susceptOrderPlot = ggplot(orderSuscept, aes(Noise, susceptibility, group = sqrt(Size), color = sqrt(Size))) + geom_point() + geom_line() + scale_y_continuous(expression(chi[o])) + scale_x_continuous(expression(eta)) + scale_color_gradient(TeX("\\sqrt{N}")) + ggtitle("Susceptibility from order"))
-save_plot(filename = paste(simDir, "susceptFromPolarization_norotation.jpg", sep = "/"), susceptOrderPlot)
-
 # Calculate the Binder cumulant based on the unified order measure.
 orderBinder = orderMeasures %>% mutate(orderSquared = orderToCalc^2, orderQuart = orderToCalc^4) %>% group_by(Size, Noise) %>%
   summarise(meanQuart = mean(orderQuart), meanSquared = mean(orderSquared)) %>% mutate(binderCumulant = 1 - meanQuart / (3 * meanSquared^2))
