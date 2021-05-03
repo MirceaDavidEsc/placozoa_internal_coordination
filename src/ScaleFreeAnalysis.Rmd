@@ -292,29 +292,6 @@ ratios = (bigBoundBox[4] - bigBoundBox[3]) / (smallBoundBox[4] - smallBoundBox[3
 
 fieldsPlot = plot_grid(bigFullV, bigCollectiveV, bigFluctV, smallFullV, smallCollectiveV, smallFluctV, ncol = 3, labels = c("A", "B", "C", "", "", ""), label_size = 36, rel_heights = c(1.26,1))
 
-# Making a guide plot
-## Try making a square guide
-gridPlot = expand.grid(Heading = seq(from = -pi, to = pi, by = pi/30), Speed = seq(from = 0, to = 10, by = 0.5))
-cbPalette = c("magenta","red","yellow","green","cyan","blue","magenta")
-
-gridLegend = ggplot(gridPlot, aes(Heading, Speed, alpha=Speed, fill = Heading)) + geom_tile() + scale_fill_gradientn(colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) + guides(alpha=F, fill=F) + scale_x_continuous(name = "Direction", breaks = c(-pi,0,pi), labels=c(expression(paste("-",pi,sep="")), 0, expression(paste(pi)))) +
-  scale_y_continuous(name=expression(paste("Speed (",mu,"m/s)",sep="")), breaks = c(0,10))
-## Try making a radial guide
-
-nextGrid = expand.grid(X = seq(from = -10, to = 10, by = 0.25), Y = seq(from = -10, to = 10, by = 0.25)) %>%
-  mutate(Heading = atan2(Y,X), Speed = sqrt(X^2 + Y^2)) %>% filter(Speed <= 10)
-
-colorWheelGuide = ggplot(nextGrid, aes(X, Y, fill = Heading, alpha = Speed)) + geom_tile() + scale_fill_gradientn(colours = cbPalette, limits = c(-pi,pi)) + guides(fill=F,alpha=F) +
-  annotate("segment", x = 0, y = 0, xend = 10, yend = 0, linetype = 2, size = 1) +
-  annotate("segment", x = 0, y = 0, xend = sqrt(30), yend = sqrt(70), arrow = arrow(length = unit(0.5, "cm")), size = 1) +
-  annotate("text", label = "theta", x = 3, y = 1.5, parse = T, size = 8) + 
-  annotate("text", label = "0", x = 0, y = -2, size = 8) +
-  annotate("text", label = "10", x = 8, y = -2, size = 8) +
-  annotate("text", label = "|v|", x = 4, y = -2.1, size = 10) +
-  annotate("rect", xmin = -11, xmax = 11, ymin = -11, ymax = 11, fill = NA, color = "black") + coord_fixed() +
-  theme(axis.title = element_blank(), axis.text = element_blank(), axis.line = element_blank(), axis.ticks = element_blank(), panel.border = element_rect(linetype = 1, fill=NA))
-
-(figVFPlot = ggdraw() + draw_plot(fieldsPlot) + draw_plot(colorWheelGuide, x = 0.19, y = 0.23, width = 0.33, height = 0.33))
 save_plot(paste(projectFolder, "Figure_GettingFluctuations.pdf", sep = "/"), figVFPlot, base_width = 15, base_height = 9)
 ```
 
