@@ -17,6 +17,7 @@
 # (snapshotsPlot = plot_grid(frame1Plot, frame2Plot, frame3Plot, ncol = 3, scale = 2))
 
 Hammamatsu_calibration = 0.616 # px / micrometer
+CoolSnap_calibration = 0.859 # px / micrometer
 
 trajectory_data = read_csv("Data_processed/trajectory_example/trajectoryML.csv")
 bgimg = readPNG("Data_processed/trajectory_example/2015-02-13-run_1_out1669_nobg.png")
@@ -29,13 +30,15 @@ imgSize = 2048
 imgymin = 0
 imgxmin = 0
 (movementExample = ggplot(filter(trajectory_centered, Frame <= 1669)) + annotation_custom(imgRaster, ymin = imgymin, ymax = imgymin + imgSize, xmin = imgxmin, xmax = imgxmin + imgSize) + coord_fixed(ratio = 1) +
-    geom_point(aes(CentroidX, CentroidY, color = Time)) + scale_color_viridis_c("Time (min)") + scale_x_continuous("", limits = c(0, 1800)) + scale_y_continuous("", limits = c(0,1800)) +
+    geom_point(aes(CentroidX, CentroidY, color = Time)) + scale_color_viridis_c("Time (min)") + 
+    scale_x_continuous(TeX("Distance ($\\mu m$)"), limits = c(0, 1800)) + 
+    scale_y_continuous(TeX("Distance ($\\mu m$)"), limits = c(0,1800)) +
     theme_minimal())
 movementExample = increase_text_size(movementExample)
 
 
 ### FUNCTION: Standardized function for plotting velocity fields from animal data.
-plot_animal_velocity_field = function(frameData, arrows = F, arrows_round = 5, arrowl = 1, scalebar = F, scalebar_l = 100, scalebar_w = 3) {
+plot_animal_velocity_field = function(frameData, arrows = F, arrows_round = 5, arrowl = 1, scalebar = F, scalebar_l = 100, scalebar_text = "", scalebar_w = 3) {
   colnames(frameData) = c("X", "Y", "vX", "vY", "speed", "angle")
   
   segmentData = frameData %>% mutate(Xround = round(X/arrows_round) * arrows_round, Yround = round(Y/arrows_round) * arrows_round) %>%
@@ -58,7 +61,8 @@ plot_animal_velocity_field = function(frameData, arrows = F, arrows_round = 5, a
   }
   
   if (scalebar) {
-    return_plot = return_plot + annotate("rect", alpha = 1, fill = "black", xmin = max(frameData$X) - scalebar_l, xmax = max(frameData$X), ymin = min(frameData$Y), ymax = min(frameData$Y) + scalebar_w)
+    return_plot = return_plot + annotate("rect", alpha = 1, fill = "black", xmin = max(frameData$X) - scalebar_l, xmax = max(frameData$X), ymin = min(frameData$Y), ymax = min(frameData$Y) + scalebar_w) +
+      annotate("text", x = max(frameData$X) / 6, y = min(frameData$Y) - 3 * scalebar_w, label = scalebar_text, size = 6) + scale_y_continuous(limits = c(min(frameData$Y) * 1.5, max(frameData$Y)))
   }
   
   return(return_plot)
@@ -67,12 +71,19 @@ plot_animal_velocity_field = function(frameData, arrows = F, arrows_round = 5, a
 # Make the velocity field plots.
 polarizedSmall = read_csv(paste(projectFolder, "Data_Processed", "polarizedFrame.csv", sep = "/"))
 polarizedSmall = mutate(polarizedSmall, X = X - mean(X), Y = Y - mean(Y))
-(arrow_plot_small_polarized = plot_animal_velocity_field(polarizedSmall, arrows = T, arrows_round = 10, arrowl = 1, scalebar = T, scalebar_l = 30, scalebar_w = 2))
+
+# Calculate the scale bar needed for 500 micrometers
+# 1 voxel / 8 pixels
+1 * CoolSnap_calibration
+
+scale_bar_length = 500 # in micrometers
+
+(arrow_plot_small_polarized = plot_animal_velocity_field(polarizedSmall, arrows = T, arrows_round = 10, arrowl = 1, scalebar = T, scalebar_l = 500 * CoolSnap_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 2))
 
 
 rotatingSmall = read_csv(paste(projectFolder, "Figures", "Small_Rotation.csv", sep = "/"))
 rotatingSmall = mutate(rotatingSmall, X = X - mean(X), Y = Y - mean(Y))
-(arrow_plot_small_rotating = plot_animal_velocity_field(rotatingSmall, arrows = T, arrows_round = 10, arrowl = 1))
+(arrow_plot_small_rotating = plot_animal_velocity_field(rotatingSmall, arrows = T, arrows_round = 10, arrowl = 1, scalebar = T, scalebar_l = 500 * CoolSnap_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 2))
 
 
 
@@ -82,13 +93,13 @@ polarizedBig = read_csv(paste(projectFolder, "Figures", "Big_Polarized.csv", sep
 
 ## Define boundaries of image, based on min and max of frame.
 
-(arrow_plot_big_order = plot_animal_velocity_field(polarizedBig, arrows = T, arrows_round = 30, arrowl = 2, scalebar = T, scalebar_l = 30, scalebar_w = 10))
+(arrow_plot_big_order = plot_animal_velocity_field(polarizedBig, arrows = T, arrows_round = 30, arrowl = 2, scalebar = T, scalebar_l = 500 * Hammamatsu_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 5))
 
 
 disorganizedBig = read_csv(paste(projectFolder, "Data_Processed", "Big_Disorganzed.csv", sep = "/")) %>% 
   mutate(X = X - mean(X), Y = Y - mean(Y))
 
-(arrow_plot_big_disorder = plot_animal_velocity_field(disorganizedBig, arrows = T, arrows_round = 30, arrowl = 2))
+(arrow_plot_big_disorder = plot_animal_velocity_field(disorganizedBig, arrows = T, arrows_round = 30, arrowl = 2, scalebar = T, scalebar_l = 500 * Hammamatsu_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 5))
 
 (velocitySnaps = plot_grid(arrow_plot_small_polarized, arrow_plot_small_rotating, arrow_plot_big_order, arrow_plot_big_disorder, ncol = 2, labels = c("B", "C", "D", "E"), scale = 1, label_size = 20))
 
