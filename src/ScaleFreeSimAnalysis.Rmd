@@ -140,7 +140,7 @@ criticalRange = c(simulationTypes$criticalMin[simTypeIndex],
                   simulationTypes$criticalMax[simTypeIndex])
 
 (orderNoisePlot = ggplot(orderDataSummary, aes(Noise, meanOrder, color = sqrt(Size), group = Size)) + 
-    geom_point() + geom_line() + scale_y_continuous("Order") +
+    geom_point() + geom_line() + scale_y_continuous("Order (O)") +
     scale_x_continuous("Spring strength (k)") + 
     scale_color_gradient(TeX("\\sqrt{N}")) + 
     annotate("rect", ymax = Inf, ymin = -Inf, xmin = criticalRange[[1]], xmax = criticalRange[[2]], fill = "red", alpha = 0.5) +
@@ -189,7 +189,7 @@ criticalityFrame = criticalityFrames %>% filter(Frame == selectedFrame) %>% sele
   mutate(angle = atan2(x = vX, y = vY), speed = sqrt(vX^2 + vY^2)) %>%
   mutate(X = X - mean(X), Y = Y - mean(Y))
 
-(criticalNoisePlot = plot_simulation_snapshot(criticalityFrame, arrows = T, arrows_round = 25, arrowMultiple = 50) +
+(criticalNoisePlot = plot_simulation_snapshot(criticalityFrame, arrows = F, arrows_round = 25, arrowMultiple = 50) +
     theme(legend.key.height = unit(1, "cm"), legend.text = element_text(size = 30), legend.title = element_text(size = 30)))
 
 write_csv(x = criticalityFrame, path = paste(projectFolder,"/figures_data/3A_criticalNoise", simSuffix,".csv", sep = ""))
@@ -208,7 +208,7 @@ schemaPlotRaster = rasterGrob(schemaPlot)
 top2 = plot_grid(schemaPlotImg, criticalNoisePlot, labels = "AUTO")
 (insetGraph = increase_text_size(orderNoisePlot) + draw_plot(increase_text_size(susceptOrderPlot) + guides(color = F), 5, 0.2, 4, 0.7))
 
-(simulationOrderPlot = plot_grid(top2, insetGraph, nrow = 2, labels = c("", "C")))
+(simulationOrderPlot = plot_grid(schemaPlotImg, criticalNoisePlot, orderNoisePlot, susceptOrderPlot, nrow = 2, labels = "AUTO"))
 save_plot(paste(projectFolder, "/figures/simulationOrderPlot",simSuffix,".pdf", sep = ""), simulationOrderPlot, base_width = 8, base_height = 6)
 
 file.copy(paste(projectFolder, "/figures/simulationOrderPlot",simSuffix,".pdf", sep = ""), paste(projectFolder, "/figures/Figure.2.pdf", sep = ""), overwrite = T)

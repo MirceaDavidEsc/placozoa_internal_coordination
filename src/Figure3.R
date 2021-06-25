@@ -65,8 +65,6 @@ profiles_plot = function(profilesDF) {
 
 originalVelocityProfiles = originalVelocityProfiles %>% increase_text_size()
 
-corrLength_plot = function()
-
 (vZeroPlot = ggplot(perFrameAvgCorrStats, aes(EquivalentDiameter_mean, vZero_mean)) + geom_point(size=2) + theme_classic() +
     geom_errorbar(aes(ymax=vZero_mean + vZero_sd / sqrt(numFrames), ymin=vZero_mean - vZero_sd / sqrt(numFrames))) +
     geom_errorbarh(aes(xmax=EquivalentDiameter_mean + EquivalentDiameter_sd / sqrt(numFrames), 
@@ -76,7 +74,8 @@ corrLength_plot = function()
 
 vZeroPlot = vZeroPlot %>% increase_text_size()
 
-(diamCorrLengthPlot_wprofiles = ggdraw() + draw_plot(vZeroPlot) + draw_plot(originalVelocityProfiles + guides(color = F), 0.15, 0.65, 0.35, 0.35))
+(diamCorrLengthPlot_wprofiles = ggdraw() + draw_plot(originalVelocityProfiles) + 
+    draw_plot(vZeroPlot + guides(color = F), 0.35, 0.6, 0.45, 0.4))
 
 ## Scale free correlations - simulation
 perFrameAvgCorrStats_sim = read_rds(paste(projectFolder, "perFrameAvgStats_sim.rds", sep = "/")) %>% ungroup()
