@@ -41,13 +41,35 @@ uncurledOrderSummary = relevantOrderData %>% group_by(folder) %>% summarize_each
 uncurledCount = relevantOrderData %>% group_by(folder) %>% summarise(count=n())
 uncurledOrderSummary = inner_join(uncurledOrderSummary, uncurledCount)
 
-(collectiveOrderSizePlot = ggplot(uncurledOrderSummary, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + geom_point() + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order") + stat_smooth(method="lm"))
+(collectiveOrderSizePlot = ggplot(uncurledOrderSummary, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + geom_point(aes(color = abs(regression))) + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order") + stat_smooth(method="lm"))
 save_plot(paste(projectFolder, "Figures", "collectiveOrderSize.pdf", sep ="/"), collectiveOrderSizePlot)
-save_plot(paste(dropboxFolder, "Panels", "collectiveOrderSize.pdf", sep = "/"), collectiveOrderSizePlot)
 
 summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary))
 
+### Regression debug residuals below
+lm_model = lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary)
+lm_model$residuals
+uncurledOrderSummary$regression = lm_model$residuals
+uncurledOrderSummary = uncurledOrderSummary %>% arrange(desc(abs(regression)))
+
+filteredVideos = read_csv("Data_Processed/curatedFolders.csv")
+uncurledOrderSummary_filtered = inner_join(uncurledOrderSummary, filteredVideos, by = c("folder" = "goodFolders"))
+
+summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary))
+summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary_filtered))
+
+(collectiveOrderSizePlot = ggplot(uncurledOrderSummary_filtered, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + geom_point() + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order") + stat_smooth(method="lm"))
+(collectiveOrderSizePlot = ggplot(uncurledOrderSummary_filtered, aes(EquivalentDiameter_mean, polarization_mean)) + geom_point() + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order") + stat_smooth(method="lm"))
+
+
+
+### End regression debug
+
+
 (collectiveOrderLM = summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary)))
+(collectiveOrderLM = summary(lm(crystalMeasure_mean ~ polarization_mean, data = uncurledOrderSummary)))
+(collectivePolSizePlot = ggplot(uncurledOrderSummary, aes(EquivalentDiameter_mean, polarization_mean)) + geom_point() + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Polarization") + stat_smooth(method="lm"))
+plot_grid(collectiveOrderSizePlot, collectivePolSizePlot)
 
 # Get the order phase space for two animals of different sizes.
 arrangedBySize = uncurledOrderSummary %>% arrange(EquivalentDiameter_mean)
