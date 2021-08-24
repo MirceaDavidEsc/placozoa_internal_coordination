@@ -41,7 +41,7 @@ uncurledOrderSummary = relevantOrderData %>% group_by(folder) %>% summarize_each
 uncurledCount = relevantOrderData %>% group_by(folder) %>% summarise(count=n())
 uncurledOrderSummary = inner_join(uncurledOrderSummary, uncurledCount)
 
-(collectiveOrderSizePlot = ggplot(uncurledOrderSummary, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + geom_point(aes(color = abs(regression))) + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order") + stat_smooth(method="lm"))
+(collectiveOrderSizePlot = ggplot(uncurledOrderSummary, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + geom_point() + xlab(expression(paste("D (",mu,"m)",sep=""))) + ylab("Order") + stat_smooth(method="lm"))
 save_plot(paste(projectFolder, "Figures", "collectiveOrderSize.pdf", sep ="/"), collectiveOrderSizePlot)
 
 summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary))
@@ -52,8 +52,9 @@ lm_model$residuals
 uncurledOrderSummary$regression = lm_model$residuals
 uncurledOrderSummary = uncurledOrderSummary %>% arrange(desc(abs(regression)))
 
-filteredVideos = read_csv("Data_Processed/curatedFolders.csv")
+filteredVideos = read_csv(paste(projectFolder,"/Data_Processed/curatedFolders.csv", sep = ""))
 uncurledOrderSummary_filtered = inner_join(uncurledOrderSummary, filteredVideos, by = c("folder" = "goodFolders"))
+write_rds(uncurledOrderSummary_filtered, paste(projectFolder, processedDataFolder,"relevantOrderData_filtered.rds", sep = "/"))
 
 summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary))
 summary(lm(crystalMeasure_mean ~ EquivalentDiameter_mean, data = uncurledOrderSummary_filtered))

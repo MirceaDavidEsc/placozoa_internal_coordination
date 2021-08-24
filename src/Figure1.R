@@ -64,7 +64,6 @@ plot_animal_velocity_field = function(frameData, arrows = F, arrows_round = 5, a
     return_plot = return_plot + annotate("rect", alpha = 1, fill = "black", xmin = max(frameData$X) - scalebar_l, xmax = max(frameData$X), ymin = min(frameData$Y), ymax = min(frameData$Y) + scalebar_w) +
       annotate("text", x = max(frameData$X) / 6, y = min(frameData$Y) - 3 * scalebar_w, label = scalebar_text, size = 6) + scale_y_continuous(limits = c(min(frameData$Y) * 1.5, max(frameData$Y)))
   }
-  
   return(return_plot)
 }
 
@@ -104,13 +103,8 @@ disorganizedBig = read_csv(paste(projectFolder, "Data_Processed", "Big_Disorganz
 (velocitySnaps = plot_grid(arrow_plot_small_polarized, arrow_plot_small_rotating, arrow_plot_big_order, arrow_plot_big_disorder, ncol = 2, labels = c("B", "C", "D", "E"), scale = 1, label_size = 20))
 
 # Order vs size plot
-relevantOrderData = read_rds(paste(projectFolder, processedDataFolder, "relevantOrderData.rds", sep = "/"))
-# Summary data for relevant order frames.
-uncurledOrderSummary = relevantOrderData %>% group_by(folder) %>% sample_n(500) %>% summarize_each(funs(mean,sd), c(EquivalentDiameter, polarization, rotation, crystalMeasure))
-uncurledCount = relevantOrderData %>% group_by(folder) %>% sample_n(500) %>% summarise(count=n())
-uncurledOrderSummary = inner_join(uncurledOrderSummary, uncurledCount)
-
-(collectiveOrderSizePlot = ggplot(uncurledOrderSummary, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + 
+relevantOrderData = read_rds(paste(projectFolder, processedDataFolder, "relevantOrderData_filtered.rds", sep = "/"))
+(collectiveOrderSizePlot = ggplot(relevantOrderData, aes(EquivalentDiameter_mean, crystalMeasure_mean)) + 
     geom_point() + 
     geom_errorbar(aes(ymin = crystalMeasure_mean - crystalMeasure_sd/sqrt(count), 
                       ymax = crystalMeasure_mean + crystalMeasure_sd/sqrt(count))) +
