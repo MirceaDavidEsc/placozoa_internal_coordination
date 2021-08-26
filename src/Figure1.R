@@ -77,12 +77,12 @@ polarizedSmall = mutate(polarizedSmall, X = X - mean(X), Y = Y - mean(Y))
 
 scale_bar_length = 500 # in micrometers
 
-(arrow_plot_small_polarized = plot_animal_velocity_field(polarizedSmall, arrows = T, arrows_round = 10, arrowl = 1, scalebar = T, scalebar_l = 500 * CoolSnap_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 2))
+(arrow_plot_small_polarized = plot_animal_velocity_field(polarizedSmall, arrows = F, arrows_round = 10, arrowl = 1, scalebar = T, scalebar_l = 500 * CoolSnap_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 2))
 
 
 rotatingSmall = read_csv(paste(projectFolder, "Figures", "Small_Rotation.csv", sep = "/"))
 rotatingSmall = mutate(rotatingSmall, X = X - mean(X), Y = Y - mean(Y))
-(arrow_plot_small_rotating = plot_animal_velocity_field(rotatingSmall, arrows = T, arrows_round = 10, arrowl = 1, scalebar = T, scalebar_l = 500 * CoolSnap_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 2))
+(arrow_plot_small_rotating = plot_animal_velocity_field(rotatingSmall, arrows = F, arrows_round = 10, arrowl = 1, scalebar = T, scalebar_l = 500 * CoolSnap_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 2))
 
 
 
@@ -92,13 +92,13 @@ polarizedBig = read_csv(paste(projectFolder, "Figures", "Big_Polarized.csv", sep
 
 ## Define boundaries of image, based on min and max of frame.
 
-(arrow_plot_big_order = plot_animal_velocity_field(polarizedBig, arrows = T, arrows_round = 30, arrowl = 2, scalebar = T, scalebar_l = 500 * Hammamatsu_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 5))
+(arrow_plot_big_order = plot_animal_velocity_field(polarizedBig, arrows = F, arrows_round = 30, arrowl = 2, scalebar = T, scalebar_l = 500 * Hammamatsu_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 5))
 
 
 disorganizedBig = read_csv(paste(projectFolder, "Data_Processed", "Big_Disorganzed.csv", sep = "/")) %>% 
   mutate(X = X - mean(X), Y = Y - mean(Y))
 
-(arrow_plot_big_disorder = plot_animal_velocity_field(disorganizedBig, arrows = T, arrows_round = 30, arrowl = 2, scalebar = T, scalebar_l = 500 * Hammamatsu_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 5))
+(arrow_plot_big_disorder = plot_animal_velocity_field(disorganizedBig, arrows = F, arrows_round = 30, arrowl = 2, scalebar = T, scalebar_l = 500 * Hammamatsu_calibration / 8, scalebar_text = TeX("500$\\mu$m"), scalebar_w = 5))
 
 (velocitySnaps = plot_grid(arrow_plot_small_polarized, arrow_plot_small_rotating, arrow_plot_big_order, arrow_plot_big_disorder, ncol = 2, labels = c("B", "C", "D", "E"), scale = 1, label_size = 20))
 
@@ -135,8 +135,8 @@ legendArrows = data.frame(X = 0, Y = 0, Heading = seq(from = -pi, to = pi, by = 
   scale_fill_gradientn(name = expression(theta), colours = cbPalette, limits = c(-pi,pi), breaks=c(-pi, 0, pi)) +
   theme(axis.title = element_blank(), axis.text = element_blank(), axis.line = element_blank(), axis.ticks = element_blank()))
 
-(figVFPlot = ggdraw() + draw_plot(velocitySnaps) + draw_plot(colorWheelGuide, x = 0.27, y = 0, width = 0.5, height = 0.35))
+(figVFPlot = ggdraw() + draw_plot(velocitySnaps) + draw_plot(colorWheelGuide, x = 0.4, y = 0, width = 0.25, height = 0.25))
 
 
-(fullFigure = plot_grid(movementExample, figVFPlot, collectiveOrderSizePlot, ncol = 1, rel_heights = c(0.4, 0.3, 0.3), labels = c("A", "", "F"), label_size = 20))
+(fullFigure = plot_grid(movementExample, figVFPlot, collectiveOrderSizePlot, ncol = 1, rel_heights = c(0.25, 0.5, 0.25), labels = c("A", "", "F"), label_size = 20))
 save_plot(filename = paste(projectFolder, "figures/Figure1.pdf", sep = "/"), fullFigure, base_width = 6, base_height = 12)
